@@ -1,5 +1,8 @@
 
 import customtkinter as ctk
+import tkinter as tk
+from tkinter import messagebox
+
 import pyperclip
 import time
 import threading
@@ -11,18 +14,25 @@ import requests
 import sqlite3
 import bcrypt
 import random
+import smtplib
 from email.message import EmailMessage
 from datetime import datetime
+
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageOps
-from tkinter import messagebox
 
-# --- CONFIGURATION ---
-LOGO_FILENAME = "helix_logo.png"
-DB_FILE = "helix_v2.db"
-SESSION_FILE = "helix_session.json"
+# =========================
+# CONFIGURATION
+# =========================
+
+APP_TITLE = "HELIX"
+
+LOGO_FILENAME = "helix_logo.png"   # packaged asset
+DB_FILE = "helix_v2.db"            # runtime data
+SESSION_FILE = "helix_session.json"  # runtime data
 
 # --- ⚠️ EMAIL SETTINGS ⚠️ ---
+# Use environment variables in real deployments.
 SMTP_EMAIL = "your_real_email@gmail.com"
 SMTP_PASSWORD = "paste_your_16_digit_app_password_here"
 
@@ -32,33 +42,32 @@ ADMIN_EMAIL = "admin@helix.com"
 # --- MODEL CONFIGURATION ---
 MODEL_CONFIG = {
     "Standard": {"id": "hermes-3-llama-3.1-8b", "cost_multiplier": 1, "desc": "⚡"},
-    "Thinking": {"id": "glm-4.1v-9b-thinking", "cost_multiplier": 3, "desc": "🧠"}
+    "Thinking": {"id": "glm-4.1v-9b-thinking", "cost_multiplier": 3, "desc": "🧠"},
 }
 
 # --- TOKEN ECONOMY ---
 INITIAL_TOKENS = 5000
+MAX_MEMORIES = 65
 
 # --- NETWORK SETTINGS ---
 LOCAL_URL = "http://localhost:1234/v1"
 PUBLIC_URL = "https://balanced-normally-mink.ngrok-free.app/v1"
 API_KEY = "lm-studio"
 
-# --- THEME (GEMINI INSPIRED) ---
+# --- THEME (Gemini-inspired) ---
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-# GEMINI-LIKE PALETTE
-BG_DARK = "#131314"  # Deep matte background
-BG_SIDEBAR = "#1E1F20"  # Soft Sidebar
-BG_CARD = "#28292A"  # Cards/Bubbles
-BG_INPUT = "#1E1F20"  # The "Island" input background
-HELIX_PURPLE = "#8AB4F8"  # Using a Soft Blue/Purple like the Gemini accent
+BG_DARK = "#131314"
+BG_SIDEBAR = "#1E1F20"
+BG_CARD = "#28292A"
+BG_INPUT = "#1E1F20"
+HELIX_PURPLE = "#8AB4F8"
 HELIX_HOVER = "#669DF6"
 TEXT_WHITE = "#E3E3E3"
 TEXT_GRAY = "#A8A8A8"
-PLACEHOLDER_GRAY = "#5f6368"
+PLACEHOLDER_GRAY = "#5F6368"
 
-# TYPOGRAPHY
 FONT_HEADER = ("Google Sans", 26, "bold")
 FONT_SUBHEADER = ("Google Sans", 18, "bold")
 FONT_NORMAL = ("Google Sans", 14)
@@ -71,245 +80,347 @@ PROMPTS = {
     "Chat": "You are Helix, an intelligent AI assistant. Answer clearly."
 }
 
+# =========================
+# PATHS (assets vs runtime data)
+# =========================
 
-# --- UTILS ---
-def resource_path(relative_path):
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+def asset_path(rel_path: str) -> str:
+    """Path for packaged assets (logo, icons, etc)."""
+    base = getattr(sys, "_MEIPASS", os.path.abspath("."))
+    return os.path.join(base, rel_path)
 
+def data_path(rel_path: str) -> str:
+    """Path for runtime data (db, session)."""
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.abspath(".")
+    return os.path.join(base, rel_path)
 
-def make_circle(pil_img):
-    pil_img = pil_img.convert("RGBA");
+# =========================
+# IMAGE UTILS
+# =========================
+
+def make_circle(pil_img: Image.Image) -> Image.Image:
+    pil_img = pil_img.convert("RGBA")
     size = pil_img.size
-    mask = Image.new('L', size, 0);
-    draw = ImageDraw.Draw(mask);
+    mask = Image.new("L", size, 0)
+    draw = ImageDraw.Draw(mask)
     draw.ellipse((0, 0) + size, fill=255)
-    output = ImageOps.fit(pil_img, mask.size, centering=(0.5, 0.5));
+    output = ImageOps.fit(pil_img, mask.size, centering=(0.5, 0.5))
     output.putalpha(mask)
     return output
 
+# =========================
+# SESSION & EMAIL
+# =========================
 
-# --- SESSION & EMAIL UTILS ---
-def save_session(email):
+def save_session(email: str) -> None:
     try:
-        with open(resource_path(SESSION_FILE), "w") as f:
+        with open(data_path(SESSION_FILE), "w", encoding="utf-8") as f:
             json.dump({"email": email, "expiry": time.time() + 604800}, f)
-    except:
+    except Exception:
         pass
 
-
-def load_session():
+def load_session() -> str | None:
     try:
-        if os.path.exists(resource_path(SESSION_FILE)):
-            with open(resource_path(SESSION_FILE)) as f:
+        path = data_path(SESSION_FILE)
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if data["expiry"] > time.time(): return data["email"]
-    except:
+            if data.get("expiry", 0) > time.time():
+                return data.get("email")
+    except Exception:
         pass
     return None
 
-
-def clear_session():
-    if os.path.exists(resource_path(SESSION_FILE)): os.remove(resource_path(SESSION_FILE))
-
-
-def send_otp_email(to_email, otp_code):
+def clear_session() -> None:
     try:
-        msg = EmailMessage();
-        msg.set_content(f"Verification code: {otp_code}");
-        msg['Subject'] = 'Helix Code';
-        msg['From'] = SMTP_EMAIL;
-        msg['To'] = to_email
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465);
-        server.login(SMTP_EMAIL, SMTP_PASSWORD);
-        server.send_message(msg);
+        path = data_path(SESSION_FILE)
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+def send_otp_email(to_email: str, otp_code: str) -> tuple[bool, str]:
+    try:
+        msg = EmailMessage()
+        msg.set_content(f"Verification code: {otp_code}")
+        msg["Subject"] = "Helix Code"
+        msg["From"] = SMTP_EMAIL
+        msg["To"] = to_email
+
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        server.login(SMTP_EMAIL, SMTP_PASSWORD)
+        server.send_message(msg)
         server.quit()
         return True, "Code sent!"
-    except:
+    except Exception:
         return False, "Email failed."
 
+# =========================
+# DATABASE
+# =========================
 
-# --- DATABASE MANAGER ---
 class DatabaseManager:
-    def __init__(self):
-        self.path = resource_path(DB_FILE); self.init_db()
+    def __init__(self) -> None:
+        self.path = data_path(DB_FILE)
+        self.init_db()
 
-    def init_db(self):
-        conn = sqlite3.connect(self.path);
+    def init_db(self) -> None:
+        conn = sqlite3.connect(self.path)
         c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS users
-                     (
-                         email
-                         TEXT
-                         PRIMARY
-                         KEY,
-                         password_hash
-                         BLOB,
-                         tokens
-                         INTEGER
-                     )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS history
-                     (
-                         email
-                         TEXT
-                         PRIMARY
-                         KEY,
-                         chat_data
-                         TEXT
-                     )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS notebooks
-                     (
-                         id
-                         TEXT
-                         PRIMARY
-                         KEY,
-                         email
-                         TEXT,
-                         title
-                         TEXT,
-                         content
-                         TEXT,
-                         updated_at
-                         TEXT
-                     )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS memories
-                     (
-                         id
-                         INTEGER
-                         PRIMARY
-                         KEY
-                         AUTOINCREMENT,
-                         email
-                         TEXT,
-                         content
-                         TEXT,
-                         created_at
-                         TEXT
-                     )''')
-        conn.commit();
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                email TEXT PRIMARY KEY,
+                password_hash BLOB,
+                tokens INTEGER
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS history (
+                email TEXT PRIMARY KEY,
+                chat_data TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS notebooks (
+                id TEXT PRIMARY KEY,
+                email TEXT,
+                title TEXT,
+                content TEXT,
+                updated_at TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT,
+                content TEXT,
+                created_at TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS profiles (
+                email TEXT PRIMARY KEY,
+                display_name TEXT,
+                bio TEXT,
+                avatar_color TEXT
+            )
+        """)
+        conn.commit()
         conn.close()
 
-    def check_exists(self, email):
-        conn = sqlite3.connect(self.path); res = conn.cursor().execute("SELECT * FROM users WHERE email=?",
-                                                                       (email,)).fetchone(); conn.close(); return res is not None
+    def check_exists(self, email: str) -> bool:
+        conn = sqlite3.connect(self.path)
+        res = conn.cursor().execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone()
+        conn.close()
+        return res is not None
 
-    def register_final(self, email, password):
-        conn = sqlite3.connect(self.path);
+    def register_final(self, email: str, password: str) -> tuple[bool, str]:
+        conn = sqlite3.connect(self.path)
         c = conn.cursor()
         try:
-            c.execute("INSERT INTO users VALUES (?, ?, ?)",
-                      (email, bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()), INITIAL_TOKENS)); c.execute(
-                "INSERT INTO history VALUES (?, ?)", (email, "{}")); conn.commit(); return True, "OK"
+            pw_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+            c.execute("INSERT INTO users VALUES (?, ?, ?)", (email, pw_hash, INITIAL_TOKENS))
+            c.execute("INSERT INTO history VALUES (?, ?)", (email, "{}"))
+            # Init profile
+            c.execute("INSERT INTO profiles VALUES (?, ?, ?, ?)", (email, email.split("@")[0], "New Helix User", "#8AB4F8"))
+            conn.commit()
+            return True, "OK"
         except Exception as e:
             return False, str(e)
         finally:
             conn.close()
 
-    def login(self, email, password):
-        conn = sqlite3.connect(self.path);
-        data = conn.cursor().execute("SELECT password_hash, tokens FROM users WHERE email=?", (email,)).fetchone();
+    def login(self, email: str, password: str) -> tuple[bool, int]:
+        conn = sqlite3.connect(self.path)
+        data = conn.cursor().execute("SELECT password_hash, tokens FROM users WHERE email=?", (email,)).fetchone()
         conn.close()
-        if data and bcrypt.checkpw(password.encode('utf-8'), data[0]): return True, data[1]
+        if data and bcrypt.checkpw(password.encode("utf-8"), data[0]):
+            return True, int(data[1])
         return False, 0
 
-    def deduct_tokens(self, email, amount):
-        conn = sqlite3.connect(self.path); c = conn.cursor(); c.execute(
-            "UPDATE users SET tokens = MAX(0, tokens - ?) WHERE email=?", (amount, email)); conn.commit(); bal = \
-        c.execute("SELECT tokens FROM users WHERE email=?", (email,)).fetchone()[0]; conn.close(); return bal
+    def deduct_tokens(self, email: str, amount: int) -> int:
+        conn = sqlite3.connect(self.path)
+        c = conn.cursor()
+        c.execute("UPDATE users SET tokens = MAX(0, tokens - ?) WHERE email=?", (amount, email))
+        conn.commit()
+        bal = c.execute("SELECT tokens FROM users WHERE email=?", (email,)).fetchone()
+        conn.close()
+        return int(bal[0]) if bal else 0
 
-    def get_token_balance(self, email):
-        conn = sqlite3.connect(self.path); res = conn.cursor().execute("SELECT tokens FROM users WHERE email=?",
-                                                                       (email,)).fetchone(); conn.close(); return res[
-            0] if res else 0
+    def get_token_balance(self, email: str) -> int:
+        conn = sqlite3.connect(self.path)
+        res = conn.cursor().execute("SELECT tokens FROM users WHERE email=?", (email,)).fetchone()
+        conn.close()
+        return int(res[0]) if res else 0
 
-    def save_chats(self, email, chat_dict):
-        conn = sqlite3.connect(self.path); conn.cursor().execute("UPDATE history SET chat_data = ? WHERE email=?",
-                                                                 (json.dumps(chat_dict),
-                                                                  email)); conn.commit(); conn.close()
+    def save_chats(self, email: str, chat_dict: dict) -> None:
+        conn = sqlite3.connect(self.path)
+        conn.cursor().execute("UPDATE history SET chat_data=? WHERE email=?", (json.dumps(chat_dict), email))
+        conn.commit()
+        conn.close()
 
-    def load_chats(self, email):
-        conn = sqlite3.connect(self.path); row = conn.cursor().execute("SELECT chat_data FROM history WHERE email=?",
-                                                                       (email,)).fetchone(); conn.close(); return json.loads(
-            row[0]) if row and row[0] else {}
+    def load_chats(self, email: str) -> dict:
+        conn = sqlite3.connect(self.path)
+        row = conn.cursor().execute("SELECT chat_data FROM history WHERE email=?", (email,)).fetchone()
+        conn.close()
+        if not row or not row[0]:
+            return {}
+        try:
+            data = json.loads(row[0])
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
 
-    def save_notebook(self, nid, email, title, content):
-        conn = sqlite3.connect(self.path); conn.cursor().execute(
+    def save_notebook(self, nid: str, email: str, title: str, content: str) -> None:
+        conn = sqlite3.connect(self.path)
+        conn.cursor().execute(
             "INSERT OR REPLACE INTO notebooks (id, email, title, content, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (nid, email, title, content, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))); conn.commit(); conn.close()
+            (nid, email, title, content, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.commit()
+        conn.close()
 
-    def load_notebooks_list(self, email):
-        conn = sqlite3.connect(self.path); res = conn.cursor().execute(
+    def load_notebooks_list(self, email: str):
+        conn = sqlite3.connect(self.path)
+        res = conn.cursor().execute(
             "SELECT id, title FROM notebooks WHERE email=? ORDER BY updated_at DESC",
-            (email,)).fetchall(); conn.close(); return res
+            (email,),
+        ).fetchall()
+        conn.close()
+        return res
 
-    def load_notebook_content(self, nid):
-        conn = sqlite3.connect(self.path); res = conn.cursor().execute(
-            "SELECT title, content FROM notebooks WHERE id=?",
-            (nid,)).fetchone(); conn.close(); return res if res else ("Untitled", "")
+    def load_notebook_content(self, nid: str) -> tuple[str, str]:
+        conn = sqlite3.connect(self.path)
+        res = conn.cursor().execute("SELECT title, content FROM notebooks WHERE id=?", (nid,)).fetchone()
+        conn.close()
+        return (res[0], res[1]) if res else ("Untitled", "")
 
-    def add_memory(self, email, content):
-        conn = sqlite3.connect(self.path); conn.cursor().execute(
+    def add_memory(self, email: str, content: str) -> None:
+        conn = sqlite3.connect(self.path)
+        c = conn.cursor()
+        # Enforce limit by deleting oldest if count >= MAX_MEMORIES
+        count = c.execute("SELECT COUNT(*) FROM memories WHERE email=?", (email,)).fetchone()[0]
+        if count >= MAX_MEMORIES:
+            # Delete oldest
+            oldest = c.execute("SELECT id FROM memories WHERE email=? ORDER BY id ASC LIMIT 1", (email,)).fetchone()
+            if oldest:
+                c.execute("DELETE FROM memories WHERE id=?", (oldest[0],))
+
+        c.execute(
             "INSERT INTO memories (email, content, created_at) VALUES (?, ?, ?)",
-            (email, content, datetime.now().strftime("%Y-%m-%d"))); conn.commit(); conn.close()
+            (email, content, datetime.now().strftime("%Y-%m-%d")),
+        )
+        conn.commit()
+        conn.close()
 
-    def get_memories(self, email):
-        conn = sqlite3.connect(self.path); res = conn.cursor().execute(
+    def get_memories(self, email: str):
+        conn = sqlite3.connect(self.path)
+        res = conn.cursor().execute(
             "SELECT id, content FROM memories WHERE email=? ORDER BY id DESC",
-            (email,)).fetchall(); conn.close(); return res
+            (email,),
+        ).fetchall()
+        conn.close()
+        return res
 
-    def delete_memory(self, mid):
-        conn = sqlite3.connect(self.path); conn.cursor().execute("DELETE FROM memories WHERE id=?",
-                                                                 (mid,)); conn.commit(); conn.close()
+    def delete_memory(self, mid: int) -> None:
+        conn = sqlite3.connect(self.path)
+        conn.cursor().execute("DELETE FROM memories WHERE id=?", (mid,))
+        conn.commit()
+        conn.close()
+
+    def get_profile(self, email: str):
+        conn = sqlite3.connect(self.path)
+        res = conn.cursor().execute("SELECT display_name, bio, avatar_color FROM profiles WHERE email=?", (email,)).fetchone()
+        conn.close()
+        if not res:
+            return (email.split("@")[0], "New Helix User", "#8AB4F8")
+        return res
+
+    def save_profile(self, email: str, display_name: str, bio: str):
+        conn = sqlite3.connect(self.path)
+        # Check if exists
+        exists = conn.cursor().execute("SELECT 1 FROM profiles WHERE email=?", (email,)).fetchone()
+        if exists:
+            conn.cursor().execute("UPDATE profiles SET display_name=?, bio=? WHERE email=?", (display_name, bio, email))
+        else:
+            conn.cursor().execute("INSERT INTO profiles VALUES (?, ?, ?, ?)", (email, display_name, bio, "#8AB4F8"))
+        conn.commit()
+        conn.close()
 
 
-# --- CLIENT ---
-def get_working_client():
+# =========================
+# AI CLIENT
+# =========================
+
+def get_working_client() -> OpenAI:
     try:
-        if requests.get(f"{LOCAL_URL}/models", timeout=1).status_code == 200: return OpenAI(base_url=LOCAL_URL,
-                                                                                            api_key=API_KEY)
-    except:
+        if requests.get(f"{LOCAL_URL}/models", timeout=1).status_code == 200:
+            return OpenAI(base_url=LOCAL_URL, api_key=API_KEY)
+    except Exception:
         pass
     return OpenAI(base_url=PUBLIC_URL, api_key=API_KEY)
-
 
 client = get_working_client()
 db = DatabaseManager()
 
+# =========================
+# FLOATING WIDGET
+# =========================
 
-# --- WIDGET ---
 class FloatingWidget(ctk.CTkToplevel):
     def __init__(self, parent):
-        super().__init__(parent);
-        self.parent = parent;
-        self.geometry("80x80+100+100");
-        self.overrideredirect(True);
-        self.attributes("-topmost", True);
-        self.configure(fg_color="#000001");
+        super().__init__(parent)
+        self.parent = parent
+        self.geometry("80x80+100+100")
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(fg_color="#000001")
         self.attributes("-transparentcolor", "#000001")
+
         try:
-            self.logo_image = ctk.CTkImage(light_image=make_circle(Image.open(resource_path(LOGO_FILENAME))),
-                                           size=(60, 60)); self.btn = ctk.CTkButton(self, text="",
-                                                                                    image=self.logo_image, width=60,
-                                                                                    height=60, corner_radius=30,
-                                                                                    fg_color="#000001",
-                                                                                    hover_color="#000001",
-                                                                                    command=self.on_click)
-        except:
-            self.btn = ctk.CTkButton(self, text="H", font=FONT_HEADER, width=60, height=60, corner_radius=30,
-                                     fg_color=HELIX_PURPLE, command=self.on_click)
+            logo = Image.open(asset_path(LOGO_FILENAME))
+            self.logo_image = ctk.CTkImage(light_image=make_circle(logo), size=(60, 60))
+            self.btn = ctk.CTkButton(
+                self,
+                text="",
+                image=self.logo_image,
+                width=60,
+                height=60,
+                corner_radius=30,
+                fg_color="#000001",
+                hover_color="#000001",
+                command=self.on_click,
+            )
+        except Exception:
+            self.btn = ctk.CTkButton(
+                self,
+                text="H",
+                font=FONT_HEADER,
+                width=60,
+                height=60,
+                corner_radius=30,
+                fg_color=HELIX_PURPLE,
+                command=self.on_click,
+                text_color="black",
+            )
+
         self.btn.place(relx=0.5, rely=0.5, anchor="center")
-        self.bind("<ButtonPress-1>", self.start_move);
-        self.bind("<B1-Motion>", self.do_move);
+
+        self.bind("<ButtonPress-1>", self.start_move)
+        self.bind("<B1-Motion>", self.do_move)
+
         self.hide_timer = None
-        self.bind("<Enter>", self.on_enter);
-        self.bind("<Leave>", self.on_leave);
+        self.bind("<Enter>", self.on_enter)
+        self.bind("<Leave>", self.on_leave)
         self.start_hide_timer()
 
     def start_move(self, e):
-        self.x = e.x; self.y = e.y
+        self.x = e.x
+        self.y = e.y
 
     def do_move(self, e):
         self.geometry(f"+{self.winfo_x() + (e.x - self.x)}+{self.winfo_y() + (e.y - self.y)}")
@@ -317,295 +428,645 @@ class FloatingWidget(ctk.CTkToplevel):
     def on_click(self):
         self.parent.show_window("clipboard")
 
-    def on_enter(self, e):
-        self.attributes("-alpha", 1.0); self.after_cancel(self.hide_timer) if self.hide_timer else None
+    def on_enter(self, _):
+        self.attributes("-alpha", 1.0)
+        if self.hide_timer:
+            try:
+                self.after_cancel(self.hide_timer)
+            except Exception:
+                pass
 
-    def on_leave(self, e):
+    def on_leave(self, _):
         self.start_hide_timer()
 
     def start_hide_timer(self):
-        self.hide_timer = self.after(10000, lambda: self.attributes("-alpha", 0.01))
+        self.hide_timer = self.after(10000, lambda: self.attributes("-alpha", 0.05))
 
+# =========================
+# SETTINGS OVERLAY (ANIMATED)
+# =========================
 
-# --- SETTINGS ---
-class SettingsModal(ctk.CTkToplevel):
-    def __init__(self, parent, db, current_user, on_logout):
-        super().__init__(parent);
-        self.db = db;
-        self.current_user = current_user;
-        self.on_logout = on_logout;
-        self.title("Settings");
-        self.geometry("850x650");
-        self.configure(fg_color=BG_DARK)
-        self.nav_buttons = {};
-        self.grid_columnconfigure(0, weight=0);
-        self.grid_columnconfigure(1, weight=1);
+class SettingsOverlay(ctk.CTkFrame):
+    def __init__(self, parent_widget, controller, dbm: DatabaseManager, current_user: str, on_logout):
+        super().__init__(parent_widget, fg_color=BG_DARK, corner_radius=0)
+        self.app = controller
+        self.db = dbm
+        self.current_user = current_user
+        self.on_logout = on_logout
+
+        # Grid layout
+        self.grid_columnconfigure(0, weight=0) # sidebar
+        self.grid_columnconfigure(1, weight=1) # content
         self.grid_rowconfigure(0, weight=1)
-        nav_frame = ctk.CTkFrame(self, width=220, fg_color=BG_SIDEBAR, corner_radius=0);
-        nav_frame.grid(row=0, column=0, sticky="nsew");
-        nav_frame.grid_propagate(False)
-        ctk.CTkLabel(nav_frame, text=f"👤 {self.current_user}", font=FONT_BOLD, text_color="white", anchor="w").pack(
-            fill="x", padx=20, pady=(30, 5))
-        ctk.CTkLabel(nav_frame, text="Free Plan", font=FONT_SMALL, text_color=HELIX_PURPLE, anchor="w").pack(fill="x",
-                                                                                                             padx=20,
-                                                                                                             pady=(0,
-                                                                                                                   20))
 
-        def nav_btn(text, page):
-            btn = ctk.CTkButton(nav_frame, text=text, fg_color="transparent", hover_color=BG_CARD, anchor="w",
-                                font=FONT_NORMAL, height=40, corner_radius=20,
-                                command=lambda: self.switch_settings(page))
-            btn.pack(fill="x", padx=10, pady=2);
-            self.nav_buttons[page] = btn
+        # Sidebar
+        self.sidebar = ctk.CTkFrame(self, width=250, fg_color=BG_SIDEBAR, corner_radius=0)
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        self.sidebar.grid_propagate(False)
 
-        nav_btn("Personalization", "Personalization");
-        nav_btn("General", "General")
-        ctk.CTkFrame(nav_frame, height=1, fg_color=BG_CARD).pack(fill="x", pady=20, padx=20)
-        ctk.CTkButton(nav_frame, text="Log out", fg_color="transparent", hover_color=BG_CARD, anchor="w",
-                      text_color="#ff5555", font=FONT_NORMAL, height=40, corner_radius=20,
-                      command=self.do_logout_modal).pack(fill="x", padx=10)
-        self.content_frame = ctk.CTkFrame(self, fg_color="transparent");
-        self.content_frame.grid(row=0, column=1, sticky="nsew", padx=40, pady=40);
-        self.switch_settings("Personalization")
+        # Header in sidebar
+        ctk.CTkLabel(self.sidebar, text="SETTINGS", font=FONT_HEADER, text_color="white").pack(
+            anchor="w", padx=30, pady=(40, 20)
+        )
 
-    def do_logout_modal(self):
-        self.destroy(); self.on_logout()
+        self.nav_btns = {}
 
-    def switch_settings(self, page):
-        for n, b in self.nav_buttons.items(): b.configure(fg_color=BG_CARD if n == page else "transparent")
-        for w in self.content_frame.winfo_children(): w.destroy()
-        ctk.CTkLabel(self.content_frame, text=page, font=FONT_HEADER, text_color="white").pack(anchor="w", pady=(0, 20))
-        if page == "Personalization":
-            ctk.CTkLabel(self.content_frame, text="Memory", font=FONT_SUBHEADER, text_color="white").pack(anchor="w",
-                                                                                                          pady=(10, 5))
-            add_f = ctk.CTkFrame(self.content_frame, fg_color="transparent");
-            add_f.pack(fill="x", pady=10)
-            self.mem_entry = ctk.CTkEntry(add_f, placeholder_text="Add memory...", height=45, corner_radius=22,
-                                          border_width=0, fg_color=BG_INPUT, font=FONT_INPUT);
-            self.mem_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-            ctk.CTkButton(add_f, text="Add", width=70, height=45, corner_radius=22, fg_color=HELIX_PURPLE,
-                          text_color="black", command=self.add_mem).pack(side="right")
-            self.mem_scroll = ctk.CTkScrollableFrame(self.content_frame, fg_color="transparent", height=400);
-            self.mem_scroll.pack(fill="both", expand=True)
-            self.refresh_memories()
+        # Tabs
+        self.create_nav_btn("Profile", "Profile")
+        self.create_nav_btn("Personalization", "Personalization")
+        self.create_nav_btn("General", "General")
+
+        ctk.CTkFrame(self.sidebar, height=1, fg_color=BG_CARD).pack(fill="x", pady=20, padx=30)
+
+        ctk.CTkButton(
+            self.sidebar,
+            text="Close",
+            fg_color=BG_CARD,
+            hover_color=BG_INPUT,
+            anchor="w",
+            text_color=TEXT_WHITE,
+            font=FONT_NORMAL,
+            height=45,
+            corner_radius=22,
+            command=self.close
+        ).pack(fill="x", padx=20, pady=5)
+
+        ctk.CTkButton(
+            self.sidebar,
+            text="Log out",
+            fg_color="transparent",
+            hover_color=BG_CARD,
+            anchor="w",
+            text_color="#ff5555",
+            font=FONT_NORMAL,
+            height=45,
+            corner_radius=22,
+            command=self.do_logout_click
+        ).pack(fill="x", padx=20, pady=5)
+
+        # Content Area
+        self.content = ctk.CTkFrame(self, fg_color="transparent")
+        self.content.grid(row=0, column=1, sticky="nsew", padx=50, pady=50)
+
+        # Initial Page
+        self.switch_page("Profile")
+
+    def create_nav_btn(self, text, page):
+        btn = ctk.CTkButton(
+            self.sidebar,
+            text=text,
+            fg_color="transparent",
+            hover_color=BG_CARD,
+            anchor="w",
+            font=FONT_NORMAL,
+            height=45,
+            corner_radius=22,
+            command=lambda: self.switch_page(page)
+        )
+        btn.pack(fill="x", padx=20, pady=5)
+        self.nav_btns[page] = btn
+
+    def do_logout_click(self):
+        self.close()
+        self.on_logout()
+
+    def close(self):
+        # Slide down animation
+        self.app.animate_overlay_close(self)
+
+    def switch_page(self, page):
+        # Update styling
+        for p, b in self.nav_btns.items():
+            b.configure(fg_color=BG_CARD if p == page else "transparent")
+
+        # Clear content
+        for w in self.content.winfo_children():
+            w.destroy()
+
+        # Title
+        ctk.CTkLabel(self.content, text=page, font=FONT_HEADER, text_color="white").pack(anchor="w", pady=(0, 20))
+
+        if page == "Profile":
+            self.build_profile_page()
+        elif page == "Personalization":
+            self.build_personalization_page()
         elif page == "General":
-            ctk.CTkLabel(self.content_frame, text="App Version 3.5 (Gemini UI)", font=FONT_NORMAL,
-                         text_color=TEXT_GRAY).pack(anchor="w")
+            self.build_general_page()
+
+    def build_profile_page(self):
+        # Fetch data
+        dname, bio, color = self.db.get_profile(self.current_user)
+
+        ctk.CTkLabel(self.content, text="Public Profile (Saved Locally)", font=FONT_NORMAL, text_color=TEXT_GRAY).pack(anchor="w", pady=(0, 20))
+
+        # Display Name
+        ctk.CTkLabel(self.content, text="Display Name", font=FONT_BOLD).pack(anchor="w", pady=(10, 5))
+        self.entry_dname = ctk.CTkEntry(self.content, width=300, height=40, font=FONT_NORMAL, fg_color=BG_INPUT, border_width=0, corner_radius=10)
+        self.entry_dname.pack(anchor="w")
+        self.entry_dname.insert(0, dname)
+
+        # Bio
+        ctk.CTkLabel(self.content, text="Bio", font=FONT_BOLD).pack(anchor="w", pady=(20, 5))
+        self.entry_bio = ctk.CTkTextbox(self.content, width=400, height=100, font=FONT_NORMAL, fg_color=BG_INPUT, border_width=0, corner_radius=10)
+        self.entry_bio.pack(anchor="w")
+        self.entry_bio.insert("0.0", bio)
+
+        # Save
+        ctk.CTkButton(self.content, text="Save Changes", fg_color=HELIX_PURPLE, text_color="black", width=150, height=40, corner_radius=20, command=self.save_profile).pack(anchor="w", pady=30)
+
+    def save_profile(self):
+        dn = self.entry_dname.get().strip()
+        bio = self.entry_bio.get("0.0", "end").strip()
+        self.db.save_profile(self.current_user, dn, bio)
+        messagebox.showinfo("Success", "Profile updated!")
+
+    def build_personalization_page(self):
+        ctk.CTkLabel(self.content, text="Memories (Max 65)", font=FONT_SUBHEADER).pack(anchor="w", pady=(10, 10))
+
+        # Add Input
+        add_row = ctk.CTkFrame(self.content, fg_color="transparent")
+        add_row.pack(fill="x", pady=10)
+
+        self.mem_entry = ctk.CTkEntry(add_row, placeholder_text="Add a new memory...", height=45, fg_color=BG_INPUT, border_width=0, corner_radius=22, font=FONT_INPUT)
+        self.mem_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+        ctk.CTkButton(add_row, text="Add", width=80, height=45, fg_color=HELIX_PURPLE, text_color="black", corner_radius=22, command=self.add_mem).pack(side="right")
+
+        # List
+        self.mem_scroll = ctk.CTkScrollableFrame(self.content, fg_color="transparent", height=400)
+        self.mem_scroll.pack(fill="both", expand=True)
+        self.refresh_memories()
 
     def refresh_memories(self):
         for w in self.mem_scroll.winfo_children(): w.destroy()
-        for m in self.db.get_memories(self.current_user):
-            row = ctk.CTkFrame(self.mem_scroll, fg_color=BG_CARD, corner_radius=15);
+        mems = self.db.get_memories(self.current_user)
+
+        for m_id, content in mems:
+            row = ctk.CTkFrame(self.mem_scroll, fg_color=BG_CARD, corner_radius=15)
             row.pack(fill="x", pady=5)
-            ctk.CTkLabel(row, text=m[1], anchor="w", text_color="white", wraplength=500, font=FONT_NORMAL).pack(
-                side="left", padx=15, pady=10)
-            ctk.CTkButton(row, text="✕", width=30, height=30, fg_color="transparent", hover_color="#333",
-                          corner_radius=15, command=lambda x=m[0]: self.del_mem(x)).pack(side="right", padx=10)
+            ctk.CTkLabel(row, text=content, anchor="w", text_color="white", wraplength=500).pack(side="left", padx=15, pady=10)
+            ctk.CTkButton(row, text="Delete", width=60, height=30, fg_color="#333", hover_color="#550000", corner_radius=15, command=lambda x=m_id: self.del_mem(x)).pack(side="right", padx=10)
 
     def add_mem(self):
-        self.db.add_memory(self.current_user,
-                           self.mem_entry.get().strip()); self.refresh_memories(); self.mem_entry.delete(0, "end")
+        txt = self.mem_entry.get().strip()
+        if not txt: return
+        self.db.add_memory(self.current_user, txt)
+        self.mem_entry.delete(0, "end")
+        self.refresh_memories()
 
     def del_mem(self, mid):
-        self.db.delete_memory(mid); self.refresh_memories()
+        self.db.delete_memory(mid)
+        self.refresh_memories()
 
+    def build_general_page(self):
+        ctk.CTkLabel(self.content, text="Appearance", font=FONT_SUBHEADER).pack(anchor="w", pady=(10, 20))
 
-# --- MAIN APP ---
+        row = ctk.CTkFrame(self.content, fg_color=BG_CARD, corner_radius=15, height=60)
+        row.pack(fill="x", pady=5)
+        row.pack_propagate(False)
+
+        ctk.CTkLabel(row, text="App Theme", font=FONT_NORMAL, text_color="white").pack(side="left", padx=20)
+
+        self.theme_var = ctk.StringVar(value=ctk.get_appearance_mode())
+
+        def toggle_theme():
+            mode = self.theme_var.get()
+            ctk.set_appearance_mode(mode)
+
+        seg = ctk.CTkSegmentedButton(row, values=["Dark", "Light"], variable=self.theme_var, command=lambda x: toggle_theme())
+        seg.pack(side="right", padx=20)
+
+# =========================
+# CHAT UI HELPERS (bubbles)
+# =========================
+
+class BubbleMessage:
+    """A message row in the chat (user bubble or assistant text block)."""
+
+    def __init__(self, parent, role: str, text: str, max_width_px: int):
+        self.role = role
+        self.container = ctk.CTkFrame(parent, fg_color="transparent")
+        self.container.grid_columnconfigure(0, weight=1)
+
+        self.max_width_px = max_width_px
+
+        if role == "user":
+            # right-aligned bubble
+            self.bubble = ctk.CTkFrame(
+                self.container,
+                fg_color=BG_CARD,
+                corner_radius=18,
+                border_width=1,
+                border_color=HELIX_PURPLE,
+            )
+            # For very short messages, keep a minimum width so it doesn't look like a weird tic-tac.
+            if len(text.strip()) <= 8:
+                self.bubble.configure(width=140)
+                self.bubble.grid_propagate(False)
+
+            self.label = ctk.CTkLabel(
+                self.bubble,
+                text=text,
+                font=FONT_NORMAL,
+                text_color=TEXT_WHITE,
+                justify="left",
+                wraplength=max_width_px,
+            )
+            self.label.pack(padx=16, pady=10)
+
+            self.bubble.grid(row=0, column=0, sticky="e", padx=(80, 0), pady=10)
+
+        else:
+            # assistant: "ChatGPT-like" text block (no obvious header)
+            self.bubble = ctk.CTkFrame(self.container, fg_color="transparent")
+            self.label = ctk.CTkLabel(
+                self.bubble,
+                text=text,
+                font=FONT_NORMAL,
+                text_color=TEXT_WHITE,
+                justify="left",
+                wraplength=max_width_px,
+            )
+            self.label.pack(anchor="w")
+            self.bubble.grid(row=0, column=0, sticky="w", padx=(0, 80), pady=12)
+
+    def grid(self, row: int):
+        self.container.grid(row=row, column=0, sticky="ew")
+        return self
+
+    def set_text(self, txt: str):
+        self.label.configure(text=txt)
+
+    def append_text(self, more: str):
+        self.label.configure(text=self.label.cget("text") + more)
+
+    def set_wraplength(self, px: int):
+        self.max_width_px = px
+        self.label.configure(wraplength=px)
+
+# =========================
+# MAIN APP
+# =========================
+
 class HelixApp(ctk.CTk):
     def __init__(self):
-        super().__init__();
-        self.title("HELIX");
-        self.geometry("1366x900");
+        super().__init__()
+
+        self.title(APP_TITLE)
+        self.geometry("1366x900")
         self.configure(fg_color=BG_DARK)
-        self.current_user = None;
-        self.token_balance = 0;
-        self.saved_chats = {};
-        self.current_model_key = "Standard";
-        self.current_note_id = None;
+
+        # state
+        self.current_user = None
+        self.token_balance = 0
+        self.saved_chats: dict = {}
+        self.current_chat_id: str | None = None
+
+        self.current_model_key = "Standard"
+        self.current_note_id: str | None = None
         self.attach_notebook_to_chat = False
-        self.frames = {}
-        self.container = ctk.CTkFrame(self, fg_color="transparent");
+
+        self.active_tab = "Talk to AI"
+
+        self.pending_email = ""
+        self.pending_pass = ""
+        self.pending_otp = ""
+
+        self.settings_overlay = None
+
+        self.container = ctk.CTkFrame(self, fg_color="transparent")
         self.container.pack(fill="both", expand=True)
-        self.setup_login_screen();
-        self.setup_otp_screen();
+
+        self.setup_login_screen()
+        self.setup_otp_screen()
         self.setup_main_app()
-        if load_session():
-            self.current_user = load_session(); self.token_balance = db.get_token_balance(
-                self.current_user); self.show_app()
+
+        # session restore
+        cached = load_session()
+        if cached:
+            self.current_user = cached
+            self.token_balance = db.get_token_balance(self.current_user)
+            self.show_app()
         else:
             self.show_login()
 
-    def setup_textbox_placeholder(self, textbox, placeholder_text, submit_func):
-        textbox.insert("0.0", placeholder_text);
-        textbox.configure(text_color=PLACEHOLDER_GRAY);
+    # ---------- UI UTIL ----------
+    def setup_textbox_placeholder(self, textbox: ctk.CTkTextbox, placeholder_text: str, submit_func):
+        textbox.delete("0.0", "end")
+        textbox.insert("0.0", placeholder_text)
+        textbox.configure(text_color=PLACEHOLDER_GRAY)
         textbox.has_placeholder = True
 
-        def on_focus_in(e):
-            if textbox.has_placeholder: textbox.delete("0.0", "end"); textbox.configure(
-                text_color=TEXT_WHITE); textbox.has_placeholder = False
+        def on_focus_in(_):
+            if getattr(textbox, "has_placeholder", False):
+                textbox.delete("0.0", "end")
+                textbox.configure(text_color=TEXT_WHITE)
+                textbox.has_placeholder = False
 
-        def on_focus_out(e):
-            if not textbox.get("0.0", "end").strip(): textbox.insert("0.0", placeholder_text); textbox.configure(
-                text_color=PLACEHOLDER_GRAY); textbox.has_placeholder = True
+        def on_focus_out(_):
+            if not textbox.get("0.0", "end").strip():
+                textbox.delete("0.0", "end")
+                textbox.insert("0.0", placeholder_text)
+                textbox.configure(text_color=PLACEHOLDER_GRAY)
+                textbox.has_placeholder = True
 
         def on_enter(e):
-            if not e.state & 0x0001:
-                if not textbox.has_placeholder: submit_func()
-                return "break"
+            # Shift+Enter creates newline
+            if e.state & 0x0001:
+                return
+            if not getattr(textbox, "has_placeholder", False):
+                submit_func()
+            return "break"
 
-        textbox.bind("<FocusIn>", on_focus_in);
-        textbox.bind("<FocusOut>", on_focus_out);
+        textbox.bind("<FocusIn>", on_focus_in)
+        textbox.bind("<FocusOut>", on_focus_out)
         textbox.bind("<Return>", on_enter)
 
-    # --- SCREENS ---
+    def scroll_chat_to_bottom(self):
+        canvas = getattr(self.chat_scroll, "_parent_canvas", None)
+        if canvas is None:
+            canvas = getattr(self.chat_scroll, "_canvas", None)
+        if canvas is not None:
+            try:
+                canvas.yview_moveto(1.0)
+            except Exception:
+                pass
+
+    # ---------- ANIMATION HELPER ----------
+    def animate_slide_page(self, old_frame, new_frame, direction="right"):
+        # We need to use place for sliding
+        # Assume both frames are children of self.pages_container
+
+        # Dimensions
+        w = self.pages_container.winfo_width()
+        h = self.pages_container.winfo_height()
+
+        # Start positions
+        # if direction is right (navigating to right tab), new frame comes from right (x=1)
+        start_x = 1.0 if direction == "right" else -1.0
+
+        new_frame.place(relx=start_x, rely=0, relwidth=1, relheight=1)
+        new_frame.lift()
+        old_frame.place(relx=0, rely=0, relwidth=1, relheight=1) # Ensure visible
+
+        steps = 15
+        dt = 10 # ms
+
+        def step(i):
+            if i > steps:
+                new_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+                old_frame.place_forget() # Hide old
+                return
+
+            # Linear interpolation
+            progress = i / steps
+            # New frame moves from start_x to 0
+            curr_new = start_x * (1 - progress)
+            # Old frame moves from 0 to -start_x
+            curr_old = -start_x * progress
+
+            new_frame.place(relx=curr_new, rely=0, relwidth=1, relheight=1)
+            old_frame.place(relx=curr_old, rely=0, relwidth=1, relheight=1)
+
+            self.after(dt, lambda: step(i + 1))
+
+        step(0)
+
+    def animate_overlay_open(self, overlay):
+        overlay.place(relx=0, rely=1, relwidth=1, relheight=1)
+        steps = 15
+        dt = 10
+        def step(i):
+            if i > steps:
+                overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+                return
+            progress = i / steps
+            # Move from rely=1 to rely=0
+            curr_y = 1.0 - progress
+            overlay.place(relx=0, rely=curr_y, relwidth=1, relheight=1)
+            self.after(dt, lambda: step(i+1))
+        step(0)
+
+    def animate_overlay_close(self, overlay):
+        steps = 15
+        dt = 10
+        def step(i):
+            if i > steps:
+                overlay.destroy()
+                self.settings_overlay = None
+                return
+            progress = i / steps
+            # Move from rely=0 to rely=1
+            curr_y = progress
+            overlay.place(relx=0, rely=curr_y, relwidth=1, relheight=1)
+            self.after(dt, lambda: step(i+1))
+        step(0)
+
+    # ---------- SCREENS ----------
     def setup_login_screen(self):
         self.login_frame = ctk.CTkFrame(self.container, fg_color=BG_DARK)
-        center = ctk.CTkFrame(self.login_frame, fg_color=BG_SIDEBAR, corner_radius=40, width=400, height=500);
-        center.place(relx=0.5, rely=0.5, anchor="center")
-        ctk.CTkLabel(center, text="HELIX", font=FONT_HEADER, text_color=HELIX_PURPLE).place(relx=0.5, rely=0.15,
-                                                                                            anchor="center")
-        self.auth_tabs = ctk.CTkTabview(center, width=350, height=350, corner_radius=20, fg_color="transparent",
-                                        segmented_button_selected_color=HELIX_PURPLE,
-                                        segmented_button_unselected_color=BG_CARD);
-        self.auth_tabs.place(relx=0.5, rely=0.55, anchor="center")
 
-        login = self.auth_tabs.add("Login");
-        signup = self.auth_tabs.add("Sign Up")
-        self.entry_login_email = ctk.CTkEntry(login, placeholder_text="Email", height=55, corner_radius=27,
-                                              fg_color=BG_INPUT, border_width=0);
-        self.entry_login_email.pack(pady=10)
-        self.entry_login_pass = ctk.CTkEntry(login, placeholder_text="Password", show="*", height=55, corner_radius=27,
-                                             fg_color=BG_INPUT, border_width=0);
-        self.entry_login_pass.pack(pady=10)
-        ctk.CTkButton(login, text="Login", height=55, corner_radius=27, fg_color=HELIX_PURPLE, text_color="black",
-                      font=FONT_BOLD, command=self.do_login).pack(pady=20)
+        # Center Card
+        card = ctk.CTkFrame(self.login_frame, fg_color=BG_SIDEBAR, corner_radius=30, width=400, height=550)
+        card.place(relx=0.5, rely=0.5, anchor="center")
+        card.pack_propagate(False)
 
-        self.entry_reg_email = ctk.CTkEntry(signup, placeholder_text="New Email", height=55, corner_radius=27,
-                                            fg_color=BG_INPUT, border_width=0);
-        self.entry_reg_email.pack(pady=10)
-        self.entry_reg_pass = ctk.CTkEntry(signup, placeholder_text="New Password", show="*", height=55,
-                                           corner_radius=27, fg_color=BG_INPUT, border_width=0);
-        self.entry_reg_pass.pack(pady=10)
-        self.btn_reg = ctk.CTkButton(signup, text="Verify", height=55, corner_radius=27, fg_color=HELIX_PURPLE,
-                                     text_color="black", font=FONT_BOLD, command=self.initiate_otp);
-        self.btn_reg.pack(pady=20)
+        # Logo Area
+        logo_area = ctk.CTkFrame(card, fg_color="transparent", height=100)
+        logo_area.pack(fill="x", pady=(40, 10))
+
+        try:
+            icon = ctk.CTkImage(light_image=Image.open(asset_path(LOGO_FILENAME)), size=(60, 60))
+            ctk.CTkLabel(logo_area, text="", image=icon).pack()
+        except:
+            ctk.CTkLabel(logo_area, text="🧬", font=("Arial", 60)).pack()
+
+        ctk.CTkLabel(card, text="HELIX", font=FONT_HEADER, text_color=HELIX_PURPLE).pack(pady=(0, 30))
+
+        # Inputs
+        self.login_mode = True # True = Login, False = Signup
+
+        self.var_email = ctk.StringVar()
+        self.var_pass = ctk.StringVar()
+
+        self.entry_auth_email = ctk.CTkEntry(card, textvariable=self.var_email, placeholder_text="Email", height=50, corner_radius=25, fg_color=BG_INPUT, border_width=1, border_color="#333")
+        self.entry_auth_email.pack(fill="x", padx=40, pady=10)
+
+        self.entry_auth_pass = ctk.CTkEntry(card, textvariable=self.var_pass, placeholder_text="Password", show="*", height=50, corner_radius=25, fg_color=BG_INPUT, border_width=1, border_color="#333")
+        self.entry_auth_pass.pack(fill="x", padx=40, pady=10)
+
+        # Action Button
+        self.btn_auth_action = ctk.CTkButton(card, text="Log In", height=50, corner_radius=25, fg_color=HELIX_PURPLE, text_color="black", font=FONT_BOLD, command=self.do_auth_action)
+        self.btn_auth_action.pack(fill="x", padx=40, pady=20)
+
+        # Toggle Link
+        self.lbl_auth_toggle = ctk.CTkLabel(card, text="Don't have an account? Sign Up", font=FONT_SMALL, text_color=HELIX_PURPLE, cursor="hand2")
+        self.lbl_auth_toggle.pack(pady=10)
+        self.lbl_auth_toggle.bind("<Button-1>", self.toggle_auth_mode)
+
+    def toggle_auth_mode(self, e):
+        self.login_mode = not self.login_mode
+        if self.login_mode:
+            self.btn_auth_action.configure(text="Log In")
+            self.lbl_auth_toggle.configure(text="Don't have an account? Sign Up")
+        else:
+            self.btn_auth_action.configure(text="Create Account")
+            self.lbl_auth_toggle.configure(text="Already have an account? Log In")
+
+    def do_auth_action(self):
+        if self.login_mode:
+            self.do_login()
+        else:
+            self.initiate_otp()
 
     def setup_otp_screen(self):
         self.otp_frame = ctk.CTkFrame(self.container, fg_color=BG_DARK)
-        center = ctk.CTkFrame(self.otp_frame, fg_color=BG_SIDEBAR, corner_radius=40);
+
+        center = ctk.CTkFrame(self.otp_frame, fg_color=BG_SIDEBAR, corner_radius=40)
         center.place(relx=0.5, rely=0.5, anchor="center")
+
         ctk.CTkLabel(center, text="VERIFY", font=FONT_HEADER, text_color=HELIX_PURPLE).pack(pady=30, padx=80)
+
         self.entry_otp = ctk.CTkEntry(center, placeholder_text="Code", height=60, width=200, corner_radius=30,
-                                      font=("Segoe UI", 24), justify="center", fg_color=BG_INPUT, border_width=0);
+                                      font=("Segoe UI", 24), justify="center", fg_color=BG_INPUT, border_width=0)
         self.entry_otp.pack(pady=20)
-        ctk.CTkButton(center, text="Submit", height=50, width=200, corner_radius=25, fg_color=HELIX_PURPLE,
-                      text_color="black", command=self.verify_otp).pack(pady=20)
-        ctk.CTkButton(center, text="Back", height=40, width=200, fg_color="transparent", command=self.show_login).pack(
-            pady=10)
+
+        ctk.CTkButton(center, text="Submit", height=50, width=200, corner_radius=25, fg_color=HELIX_PURPLE, text_color="black",
+                      command=self.verify_otp).pack(pady=20)
+
+        ctk.CTkButton(center, text="Back", height=40, width=200, fg_color="transparent", command=self.show_login).pack(pady=10)
 
     def setup_main_app(self):
         self.app_frame = ctk.CTkFrame(self.container, fg_color=BG_DARK)
+        self.app_frame.grid_rowconfigure(0, weight=1)
+        self.app_frame.grid_columnconfigure(0, weight=0)
+        self.app_frame.grid_columnconfigure(1, weight=1)
 
-        # --- SIDEBAR (Initial Setup) ---
+        # Sidebar (Talk only)
         self.sidebar = ctk.CTkFrame(self.app_frame, width=280, fg_color=BG_SIDEBAR, corner_radius=0)
-        # We DO NOT pack it here. The switch_tab logic handles packing it.
-        # But we initialize its children:
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        self.sidebar.grid_propagate(False)
 
-        # Logo Area
-        logo_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent", height=80);
-        logo_frame.pack(fill="x", padx=25, pady=25)
+        # Logo row
+        logo_row = ctk.CTkFrame(self.sidebar, fg_color="transparent", height=80)
+        logo_row.pack(fill="x", padx=25, pady=(25, 15))
         try:
-            icon = ctk.CTkImage(light_image=Image.open(resource_path(LOGO_FILENAME)), size=(35, 35)); ctk.CTkLabel(
-                logo_frame, text="", image=icon).pack(side="left")
-        except:
+            icon = ctk.CTkImage(light_image=Image.open(asset_path(LOGO_FILENAME)), size=(34, 34))
+            ctk.CTkLabel(logo_row, text="", image=icon).pack(side="left")
+        except Exception:
             pass
-        ctk.CTkLabel(logo_frame, text="HELIX", font=FONT_HEADER, text_color=TEXT_WHITE).pack(side="left", padx=15)
+        ctk.CTkLabel(logo_row, text="HELIX", font=FONT_HEADER, text_color=TEXT_WHITE).pack(side="left", padx=12)
 
-        # New Chat Button (Pill Shape)
-        ctk.CTkButton(self.sidebar, text="+ New Chat", fg_color=BG_CARD, hover_color=BG_INPUT, height=50,
-                      corner_radius=25, font=FONT_BOLD, text_color=TEXT_GRAY, command=self.create_new_chat).pack(
-            fill="x", padx=20, pady=10)
+        # New chat
+        ctk.CTkButton(self.sidebar, text="+ New Chat", fg_color=BG_CARD, hover_color=BG_INPUT, height=50, corner_radius=25,
+                      font=FONT_BOLD, text_color=TEXT_GRAY, command=self.create_new_chat).pack(fill="x", padx=20, pady=(5, 10))
 
-        # History List
-        ctk.CTkLabel(self.sidebar, text="Recent", font=FONT_SMALL, text_color=TEXT_GRAY).pack(anchor="w", padx=25,
-                                                                                              pady=(20, 5))
-        self.chat_list_frame = ctk.CTkScrollableFrame(self.sidebar, fg_color="transparent");
-        self.chat_list_frame.pack(fill="both", expand=True, padx=10)
+        ctk.CTkLabel(self.sidebar, text="Recent", font=FONT_SMALL, text_color=TEXT_GRAY).pack(anchor="w", padx=25, pady=(14, 6))
 
-        # Settings
-        footer = ctk.CTkFrame(self.sidebar, fg_color="transparent", height=60);
-        footer.pack(fill="x", side="bottom", padx=20, pady=20)
-        ctk.CTkButton(footer, text="⚙️ Settings", fg_color="transparent", hover_color=BG_CARD, anchor="w", height=45,
-                      corner_radius=22, font=FONT_NORMAL, command=self.open_settings).pack(fill="x")
+        self.chat_list_frame = ctk.CTkScrollableFrame(self.sidebar, fg_color="transparent")
+        self.chat_list_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # --- MAIN CONTENT AREA ---
-        self.main_area = ctk.CTkFrame(self.app_frame, fg_color=BG_DARK);
-        self.main_area.pack(side="right", fill="both", expand=True)
+        footer = ctk.CTkFrame(self.sidebar, fg_color="transparent", height=60)
+        footer.pack(fill="x", side="bottom", padx=20, pady=18)
 
-        # Custom Tab Switcher (Floating Pill Style at Bottom)
-        tab_switcher = ctk.CTkFrame(self.main_area, fg_color=BG_CARD, corner_radius=20, height=40)
-        tab_switcher.place(relx=0.5, rely=0.96, anchor="center")
+        self.settings_btn = ctk.CTkButton(
+            footer,
+            text="⚙️ Settings",
+            fg_color="transparent",
+            hover_color=BG_CARD,
+            anchor="w",
+            height=45,
+            corner_radius=22,
+            font=FONT_NORMAL,
+            command=self.open_settings,
+        )
+        self.settings_btn.pack(fill="x")
 
-        # We use a custom function to switch so we can toggle sidebar
-        def tab_btn(txt):
-            ctk.CTkButton(tab_switcher, text=txt, fg_color="transparent", hover_color=BG_INPUT, width=80, height=30,
-                          corner_radius=15, font=FONT_SMALL, command=lambda: self.switch_tab(txt)).pack(side="left",
-                                                                                                        padx=5, pady=5)
+        # Main area
+        self.main_area = ctk.CTkFrame(self.app_frame, fg_color=BG_DARK)
+        self.main_area.grid(row=0, column=1, sticky="nsew")
+        self.main_area.grid_rowconfigure(0, weight=1)
+        self.main_area.grid_columnconfigure(0, weight=1)
 
-        tab_btn("Talk to AI");
-        tab_btn("Notebook");
-        tab_btn("Quick Fix")
+        # PAGES CONTAINER (Use Place for Animations)
+        self.pages_container = ctk.CTkFrame(self.main_area, fg_color="transparent")
+        self.pages_container.grid(row=0, column=0, sticky="nsew")
+        # No grid config needed for children since we use place
 
-        self.setup_talk_to_ai();
-        self.setup_notebook();
-        self.setup_quick_fix()
+        self.pages: dict[str, ctk.CTkFrame] = {}
+        self.pages["Talk to AI"] = ctk.CTkFrame(self.pages_container, fg_color=BG_DARK)
+        self.pages["Notebook"] = ctk.CTkFrame(self.pages_container, fg_color=BG_DARK)
+        self.pages["Quick Fix"] = ctk.CTkFrame(self.pages_container, fg_color=BG_DARK)
+
+        # Init pages (hidden or placed)
+        for p in self.pages.values():
+            p.place(relx=1.0, rely=0, relwidth=1, relheight=1) # Start off-screen right
+
+        self._setup_talk_page(self.pages["Talk to AI"])
+        self._setup_notebook_page(self.pages["Notebook"])
+        self._setup_quickfix_page(self.pages["Quick Fix"])
+
+        # Bottom nav pill
+        self.nav_buttons: dict[str, ctk.CTkButton] = {}
+        self.bottom_nav = ctk.CTkFrame(self.main_area, fg_color=BG_CARD, corner_radius=22, height=44)
+        self.bottom_nav.place(relx=0.5, rely=1.0, anchor="s", y=-14)
+
+        def make_nav_btn(name: str, w: int = 105):
+            b = ctk.CTkButton(
+                self.bottom_nav,
+                text=name,
+                fg_color="transparent",
+                hover_color=BG_INPUT,
+                text_color=TEXT_WHITE,
+                width=w,
+                height=34,
+                corner_radius=17,
+                font=FONT_SMALL,
+                command=lambda n=name: self.switch_tab(n),
+            )
+            b.pack(side="left", padx=6, pady=5)
+            self.nav_buttons[name] = b
+
+        make_nav_btn("Talk to AI", 120)
+        make_nav_btn("Notebook", 105)
+        make_nav_btn("Quick Fix", 110)
+
         self.widget = FloatingWidget(self)
 
-    # --- TAB & SIDEBAR LOGIC ---
-    def switch_tab(self, tab_name):
-        for name, frame in self.frames.items():
-            if name == tab_name:
-                frame.pack(fill="both", expand=True)
-            else:
-                frame.pack_forget()
-
-        if tab_name == "Talk to AI":
-            # Show sidebar, pack it LEFT of main_area
-            self.sidebar.pack(side="left", fill="y", before=self.main_area)
-        else:
-            # Hide sidebar
-            self.sidebar.pack_forget()
-
-    # --- CHAT TAB (GEMINI STYLE INPUT ISLAND) ---
-    def setup_talk_to_ai(self):
-        self.frames["Talk to AI"] = ctk.CTkFrame(self.main_area, fg_color="transparent")
-        tab = self.frames["Talk to AI"]
-        tab.grid_columnconfigure(0, weight=1);
-        tab.grid_rowconfigure(0, weight=1);
+    # ---------- PAGES ----------
+    def _setup_talk_page(self, tab: ctk.CTkFrame):
+        tab.grid_rowconfigure(0, weight=1)
         tab.grid_rowconfigure(1, weight=0)
+        tab.grid_columnconfigure(0, weight=1)
 
-        # Welcome Screen
-        self.welcome_frame = ctk.CTkFrame(tab, fg_color="transparent");
+        # welcome
+        self.welcome_frame = ctk.CTkFrame(tab, fg_color="transparent")
         self.welcome_frame.grid(row=0, column=0, sticky="nsew")
-        center = ctk.CTkFrame(self.welcome_frame, fg_color="transparent");
+
+        center = ctk.CTkFrame(self.welcome_frame, fg_color="transparent")
         center.place(relx=0.5, rely=0.40, anchor="center")
+
         try:
-            icon = ctk.CTkImage(light_image=Image.open(resource_path(LOGO_FILENAME)), size=(70, 70)); ctk.CTkLabel(
-                center, text="", image=icon).pack(pady=10)
-        except:
+            icon = ctk.CTkImage(light_image=Image.open(asset_path(LOGO_FILENAME)), size=(70, 70))
+            ctk.CTkLabel(center, text="", image=icon).pack(pady=10)
+        except Exception:
             pass
-        ctk.CTkLabel(center, text="Hello, I'm Helix", font=("Google Sans", 36), text_color="white").pack(pady=5)
-        ctk.CTkLabel(center, text="How can I help you today?", font=("Google Sans", 20), text_color=TEXT_GRAY).pack(
-            pady=0)
 
-        # Chat Box (Hidden initially)
-        self.chat_box = ctk.CTkTextbox(tab, font=FONT_NORMAL, wrap="word", fg_color="transparent",
-                                       text_color=TEXT_WHITE, activate_scrollbars=True)
-        # It's in grid row 0, same as welcome
+        ctk.CTkLabel(center, text="Hello", font=("Google Sans", 36), text_color="white").pack(pady=5)
+        ctk.CTkLabel(center, text="How can I help you today?", font=("Google Sans", 20), text_color=TEXT_GRAY).pack(pady=0)
 
-        # --- THE INPUT ISLAND ---
+        # chat scroll (hidden until messages)
+        self.chat_scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        self.chat_scroll.grid(row=0, column=0, sticky="nsew", padx=120, pady=(40, 120))
+        self.chat_scroll.grid_columnconfigure(0, weight=1)
+        self.chat_scroll.grid_remove()
+
+        self.chat_rows: list[BubbleMessage] = []
+        self.chat_row_index = 0
+
+        # input island
         input_wrapper = ctk.CTkFrame(tab, fg_color="transparent")
-        input_wrapper.grid(row=1, column=0, sticky="ew", padx=120, pady=(0, 100))
+        input_wrapper.grid(row=1, column=0, sticky="ew", padx=120, pady=(0, 90))  # leave room for bottom nav
 
         self.input_pill = ctk.CTkFrame(input_wrapper, fg_color=BG_INPUT, height=120, corner_radius=32)
         self.input_pill.pack(fill="x", expand=True)
@@ -618,265 +1079,596 @@ class HelixApp(ctk.CTk):
         tools_row = ctk.CTkFrame(self.input_pill, fg_color="transparent", height=40)
         tools_row.pack(fill="x", padx=10, pady=(0, 10))
 
-        self.btn_attach = ctk.CTkButton(tools_row, text="+", width=35, height=35, fg_color=BG_CARD, hover_color=BG_DARK,
-                                        text_color=TEXT_GRAY, font=("Arial", 20), corner_radius=17,
-                                        command=self.toggle_attach)
+        self.btn_attach = ctk.CTkButton(
+            tools_row, text="+", width=35, height=35,
+            fg_color=BG_CARD, hover_color=BG_DARK,
+            text_color=TEXT_GRAY, font=("Arial", 20),
+            corner_radius=17, command=self.toggle_attach
+        )
         self.btn_attach.pack(side="left", padx=(10, 5))
 
         self.model_var = ctk.StringVar(value="Standard")
-        self.model_dropdown = ctk.CTkOptionMenu(tools_row, variable=self.model_var, values=["Standard", "Thinking"],
-                                                command=self.change_model, width=110, height=32, corner_radius=16,
-                                                fg_color=BG_CARD, button_color=BG_CARD, button_hover_color=BG_DARK,
-                                                text_color=TEXT_GRAY)
+        self.model_dropdown = ctk.CTkOptionMenu(
+            tools_row,
+            variable=self.model_var,
+            values=["Standard", "Thinking"],
+            command=self.change_model,
+            width=120,
+            height=32,
+            corner_radius=16,
+            fg_color=BG_CARD,
+            button_color=BG_CARD,
+            button_hover_color=BG_DARK,
+            text_color=TEXT_GRAY,
+        )
         self.model_dropdown.pack(side="left", padx=5)
 
-        self.btn_send = ctk.CTkButton(tools_row, text="➤", width=50, height=35, fg_color=HELIX_PURPLE,
-                                      text_color="black", hover_color=HELIX_HOVER, corner_radius=17, font=("Arial", 16),
-                                      command=self.send_chat)
+        self.btn_send = ctk.CTkButton(
+            tools_row, text="➤",
+            width=50, height=35,
+            fg_color=HELIX_PURPLE, hover_color=HELIX_HOVER,
+            text_color="black", corner_radius=17,
+            font=("Arial", 16), command=self.send_chat
+        )
         self.btn_send.pack(side="right", padx=10)
 
-    # --- NOTEBOOK TAB ---
-    def setup_notebook(self):
-        self.frames["Notebook"] = ctk.CTkFrame(self.main_area, fg_color="transparent")
-        tab = self.frames["Notebook"]
-        tab.grid_columnconfigure(0, weight=0);
-        tab.grid_columnconfigure(1, weight=1);
+        # adjust wraplength dynamically on resize
+        def on_resize(_):
+            max_w = max(420, min(780, tab.winfo_width() - 240))
+            for msg in self.chat_rows:
+                msg.set_wraplength(max_w)
+
+        tab.bind("<Configure>", on_resize)
+
+    def _setup_notebook_page(self, tab: ctk.CTkFrame):
+        tab.grid_columnconfigure(0, weight=0)
+        tab.grid_columnconfigure(1, weight=1)
         tab.grid_rowconfigure(0, weight=1)
-        # File list
-        list_frame = ctk.CTkFrame(tab, width=220, fg_color=BG_SIDEBAR, corner_radius=20);
-        list_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 15));
+
+        list_frame = ctk.CTkFrame(tab, width=240, fg_color=BG_SIDEBAR, corner_radius=20)
+        list_frame.grid(row=0, column=0, sticky="nsew", padx=(20, 15), pady=(20, 90))  # bottom padding for nav
         list_frame.grid_propagate(False)
-        ctk.CTkButton(list_frame, text="+ New Page", fg_color=BG_CARD, hover_color=BG_INPUT, height=45,
-                      corner_radius=22, command=self.notebook_new).pack(fill="x", padx=15, pady=15)
-        self.notebook_list_frame = ctk.CTkScrollableFrame(list_frame, fg_color="transparent");
-        self.notebook_list_frame.pack(fill="both", expand=True)
-        # Editor
-        editor = ctk.CTkFrame(tab, fg_color=BG_INPUT, corner_radius=20);
-        editor.grid(row=0, column=1, sticky="nsew")
-        editor.grid_rowconfigure(1, weight=1);
+
+        ctk.CTkButton(list_frame, text="+ New Page", fg_color=BG_CARD, hover_color=BG_INPUT, height=45, corner_radius=22,
+                      command=self.notebook_new).pack(fill="x", padx=15, pady=15)
+
+        self.notebook_list_frame = ctk.CTkScrollableFrame(list_frame, fg_color="transparent")
+        self.notebook_list_frame.pack(fill="both", expand=True, padx=8, pady=(0, 10))
+
+        editor = ctk.CTkFrame(tab, fg_color=BG_INPUT, corner_radius=20)
+        editor.grid(row=0, column=1, sticky="nsew", padx=(0, 20), pady=(20, 90))  # bottom padding for nav
+        editor.grid_rowconfigure(1, weight=1)
         editor.grid_columnconfigure(0, weight=1)
-        self.note_title = ctk.CTkEntry(editor, font=FONT_HEADER, fg_color="transparent", border_width=0,
-                                       placeholder_text="Untitled");
+
+        self.note_title = ctk.CTkEntry(editor, font=FONT_HEADER, fg_color="transparent", border_width=0, placeholder_text="Untitled")
         self.note_title.grid(row=0, column=0, sticky="ew", padx=30, pady=(20, 10))
+
         ctk.CTkButton(editor, text="Save", width=70, height=35, corner_radius=17, fg_color=BG_CARD, hover_color=BG_DARK,
-                      command=self.notebook_save).grid(row=0, column=1, padx=30)
-        self.notebook = ctk.CTkTextbox(editor, font=FONT_NORMAL, fg_color="transparent", wrap="word");
-        self.notebook.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=30)
-        # AI Bar
-        ai_bar = ctk.CTkFrame(editor, fg_color=BG_CARD, height=60, corner_radius=30);
-        ai_bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=30, pady=(20, 80))
-        self.note_prompt = ctk.CTkTextbox(ai_bar, height=35, fg_color="transparent", font=FONT_INPUT, wrap="word");
+                      command=self.notebook_save).grid(row=0, column=1, padx=30, pady=(20,10))
+
+        self.notebook = ctk.CTkTextbox(editor, font=FONT_NORMAL, fg_color="transparent", wrap="word")
+        self.notebook.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=30, pady=(0, 0))
+
+        ai_bar = ctk.CTkFrame(editor, fg_color=BG_CARD, height=60, corner_radius=30)
+        ai_bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=30, pady=20)
+
+        self.note_prompt = ctk.CTkTextbox(ai_bar, height=35, fg_color="transparent", font=FONT_INPUT, wrap="word")
         self.note_prompt.pack(side="left", fill="x", expand=True, padx=20, pady=12)
         self.setup_textbox_placeholder(self.note_prompt, "Instruct Helix to edit...", self.notebook_ai_run)
-        ctk.CTkButton(ai_bar, text="Generate", width=90, height=40, corner_radius=20, fg_color=HELIX_PURPLE,
-                      text_color="black", command=self.notebook_ai_run).pack(side="right", padx=10)
 
-    # --- QUICK FIX TAB ---
-    def setup_quick_fix(self):
-        self.frames["Quick Fix"] = ctk.CTkFrame(self.main_area, fg_color="transparent")
-        tab = self.frames["Quick Fix"]
-        tab.grid_columnconfigure(0, weight=1);
+        ctk.CTkButton(ai_bar, text="Generate", width=90, height=40, corner_radius=20, fg_color=HELIX_PURPLE, text_color="black",
+                      command=self.notebook_ai_run).pack(side="right", padx=10)
+
+    def _setup_quickfix_page(self, tab: ctk.CTkFrame):
         tab.grid_rowconfigure(0, weight=1)
-        self.q_result = ctk.CTkTextbox(tab, font=FONT_NORMAL, fg_color=BG_INPUT, corner_radius=20);
-        self.q_result.grid(row=0, column=0, sticky="nsew", padx=60, pady=60)
+        tab.grid_columnconfigure(0, weight=1)
 
-        bar = ctk.CTkFrame(tab, fg_color=BG_INPUT, height=70, corner_radius=35);
-        bar.grid(row=1, column=0, sticky="ew", padx=60, pady=(0, 90))
-        self.q_prompt = ctk.CTkTextbox(bar, height=45, fg_color="transparent", font=FONT_INPUT);
+        self.q_result = ctk.CTkTextbox(tab, font=FONT_NORMAL, fg_color=BG_INPUT, corner_radius=20, wrap="word")
+        self.q_result.grid(row=0, column=0, sticky="nsew", padx=60, pady=(60, 10))
+
+        bar = ctk.CTkFrame(tab, fg_color=BG_INPUT, height=70, corner_radius=35)
+        bar.grid(row=1, column=0, sticky="ew", padx=60, pady=(0, 90))  # bottom padding for nav
+
+        self.q_prompt = ctk.CTkTextbox(bar, height=45, fg_color="transparent", font=FONT_INPUT, wrap="word")
         self.q_prompt.pack(side="left", fill="x", expand=True, padx=25, pady=12)
         self.setup_textbox_placeholder(self.q_prompt, "Custom instruction...", self.quick_fix_custom_run)
-        ctk.CTkButton(bar, text="Refine", width=100, height=45, corner_radius=22, fg_color=HELIX_PURPLE,
-                      text_color="black", command=self.quick_fix_custom_run).pack(side="right", padx=12)
 
-    # --- LOGIC ---
+        ctk.CTkButton(bar, text="Refine", width=100, height=45, corner_radius=22, fg_color=HELIX_PURPLE, text_color="black",
+                      command=self.quick_fix_custom_run).pack(side="right", padx=12)
+
+    # ---------- TAB / NAV ----------
+    def switch_tab(self, tab_name: str):
+        if tab_name == self.active_tab: return
+
+        # Decide direction
+        order = ["Talk to AI", "Notebook", "Quick Fix"]
+        try:
+            curr_idx = order.index(self.active_tab)
+            new_idx = order.index(tab_name)
+            direction = "right" if new_idx > curr_idx else "left"
+        except:
+            direction = "right"
+
+        old_frame = self.pages[self.active_tab]
+        new_frame = self.pages[tab_name]
+
+        self.active_tab = tab_name
+        self.animate_slide_page(old_frame, new_frame, direction)
+
+        if tab_name == "Talk to AI":
+            self.sidebar.grid()
+        else:
+            self.sidebar.grid_remove()
+
+        for name, btn in self.nav_buttons.items():
+            btn.configure(fg_color=BG_INPUT if name == tab_name else "transparent")
+
+    # ---------- SETTINGS ----------
     def open_settings(self):
-        SettingsModal(self, db, self.current_user, self.do_logout)
+        if not self.current_user: return
+        if self.settings_overlay: return # Already open
 
-    def toggle_attach(self):
-        self.attach_notebook_to_chat = not self.attach_notebook_to_chat; self.btn_attach.configure(
-            fg_color=HELIX_PURPLE if self.attach_notebook_to_chat else BG_CARD)
+        # Pass self (HelixApp) as parent, but place it inside app_frame or main_area
+        # To make it cover everything, we use self (the root window) or app_frame.
+        # But SettingsOverlay expects 'parent_app' to be the logic controller (HelixApp)
+        # AND a parent widget.
 
+        # We will make SettingsOverlay a child of app_frame so it stays in the content area
+        self.settings_overlay = SettingsOverlay(self.app_frame, self, db, self.current_user, self.do_logout)
+        self.animate_overlay_open(self.settings_overlay)
+
+    # ---------- AUTH ----------
+    def show_login(self):
+        self.app_frame.pack_forget()
+        self.otp_frame.pack_forget()
+        self.login_frame.pack(fill="both", expand=True)
+
+    def show_otp(self):
+        self.login_frame.pack_forget()
+        self.otp_frame.pack(fill="both", expand=True)
+
+    def show_app(self):
+        self.login_frame.pack_forget()
+        self.otp_frame.pack_forget()
+        self.app_frame.pack(fill="both", expand=True)
+
+        self.saved_chats = db.load_chats(self.current_user)
+        self.refresh_notebook_list()
+
+        cleaned = {}
+        for cid, cdata in (self.saved_chats or {}).items():
+            if not isinstance(cdata, dict):
+                continue
+            title = str(cdata.get("title", "New Chat"))
+            msgs = cdata.get("msgs", [])
+            if not isinstance(msgs, list):
+                msgs = []
+            cleaned[cid] = {"title": title, "msgs": msgs}
+        self.saved_chats = cleaned
+
+        self.refresh_sidebar()
+        self.create_new_chat()
+
+        # Reset pages
+        for p in self.pages.values(): p.place(relx=1.0, rely=0)
+        self.pages["Talk to AI"].place(relx=0, rely=0)
+        self.active_tab = "Talk to AI"
+        self.switch_tab("Talk to AI") # ensures UI state correct
+
+    def do_login(self):
+        email = self.var_email.get().strip()
+        p = self.var_pass.get()
+
+        if not email or not p:
+            messagebox.showerror("Error", "Missing email or password.")
+            return
+
+        success, tokens = db.login(email, p)
+        if success:
+            self.current_user = email
+            self.token_balance = tokens
+            save_session(email)
+            self.show_app()
+        else:
+            messagebox.showerror("Error", "Login failed.")
+
+    def do_logout(self):
+        clear_session()
+        self.current_user = None
+        self.token_balance = 0
+        self.saved_chats = {}
+        self.current_chat_id = None
+        self.clear_chat_view()
+        self.show_login()
+
+    def initiate_otp(self):
+        self.pending_email = self.var_email.get().strip()
+        self.pending_pass = self.var_pass.get()
+
+        if not self.pending_email or not self.pending_pass:
+            messagebox.showerror("Error", "Missing email or password.")
+            return
+        if db.check_exists(self.pending_email):
+            messagebox.showerror("Error", "Account already exists.")
+            return
+
+        self.pending_otp = str(random.randint(100000, 999999))
+
+        def send():
+            send_otp_email(self.pending_email, self.pending_otp)
+
+        threading.Thread(target=send, daemon=True).start()
+        self.entry_otp.delete(0, "end")
+        self.show_otp()
+
+    def verify_otp(self):
+        if self.entry_otp.get().strip() != self.pending_otp:
+            messagebox.showerror("Error", "Invalid code.")
+            return
+
+        ok, msg = db.register_final(self.pending_email, self.pending_pass)
+        if not ok:
+            messagebox.showerror("Error", msg)
+            return
+
+        self.current_user = self.pending_email
+        self.token_balance = INITIAL_TOKENS
+        save_session(self.current_user)
+        self.show_app()
+
+    # ---------- SIDEBAR / CHAT LIST ----------
+    def refresh_sidebar(self):
+        for w in self.chat_list_frame.winfo_children():
+            w.destroy()
+
+        ids = list(self.saved_chats.keys())[::-1]
+        for c_id in ids:
+            title = self.saved_chats[c_id].get("title", "New Chat")
+            title = str(title).strip() or "New Chat"
+            display = title if len(title) <= 28 else title[:28] + "…"
+
+            btn = ctk.CTkButton(
+                self.chat_list_frame,
+                text=display,
+                anchor="w",
+                fg_color="transparent",
+                hover_color=BG_CARD,
+                height=40,
+                corner_radius=18,
+                font=FONT_NORMAL,
+                command=lambda x=c_id: self.load_chat(x),
+            )
+            btn.pack(fill="x", pady=2, padx=6)
+
+            btn.bind("<Button-3>", lambda e, cid=c_id: self.show_chat_context_menu(e, cid))
+            btn.bind("<Button-2>", lambda e, cid=c_id: self.show_chat_context_menu(e, cid))
+
+    def show_chat_context_menu(self, event, chat_id: str):
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Open", command=lambda: self.load_chat(chat_id))
+        menu.add_command(label="Branch (duplicate)", command=lambda: self.branch_chat(chat_id))
+        menu.add_separator()
+        menu.add_command(label="Delete", command=lambda: self.delete_chat(chat_id))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+
+    def delete_chat(self, chat_id: str):
+        if chat_id not in self.saved_chats:
+            return
+        if not messagebox.askyesno("Delete chat", "Delete this chat?"):
+            return
+        del self.saved_chats[chat_id]
+        if self.current_chat_id == chat_id:
+            self.create_new_chat()
+        self.save_history()
+        self.refresh_sidebar()
+
+    def branch_chat(self, chat_id: str):
+        if chat_id not in self.saved_chats:
+            return
+        src = self.saved_chats[chat_id]
+        new_id = str(uuid.uuid4())
+        new_title = f"Branch: {src.get('title', 'Chat')}"
+        new_msgs = list(src.get("msgs", []))
+        self.saved_chats[new_id] = {"title": new_title, "msgs": new_msgs}
+        self.save_history()
+        self.refresh_sidebar()
+
+    # ---------- CHAT VIEW ----------
+    def clear_chat_view(self):
+        if hasattr(self, "chat_scroll"):
+            for w in self.chat_scroll.winfo_children():
+                w.destroy()
+        self.chat_rows = []
+        self.chat_row_index = 0
+        if hasattr(self, "chat_scroll"):
+            self.chat_scroll.grid_remove()
+        if hasattr(self, "welcome_frame"):
+            self.welcome_frame.grid()
+
+    def _ensure_chat_visible(self):
+        self.welcome_frame.grid_remove()
+        self.chat_scroll.grid()
+        self.scroll_chat_to_bottom()
+
+    def add_message(self, role: str, text: str) -> BubbleMessage:
+        self._ensure_chat_visible()
+        tab = self.pages["Talk to AI"]
+        max_w = max(420, min(780, tab.winfo_width() - 240))
+        msg = BubbleMessage(self.chat_scroll, role=role, text=text, max_width_px=max_w).grid(self.chat_row_index)
+        self.chat_row_index += 1
+        self.chat_rows.append(msg)
+        self.scroll_chat_to_bottom()
+        return msg
+
+    def load_chat(self, chat_id: str):
+        self.current_chat_id = chat_id
+        self.clear_chat_view()
+        data = self.saved_chats.get(chat_id, {"title": "New Chat", "msgs": []})
+        msgs = data.get("msgs", [])
+        if msgs:
+            self._ensure_chat_visible()
+        for m in msgs:
+            role = "user" if m.get("role") == "user" else "assistant"
+            self.add_message(role, str(m.get("content", "")))
+
+    def create_new_chat(self):
+        new_id = str(uuid.uuid4())
+        self.saved_chats[new_id] = {"title": "New Chat", "msgs": []}
+        self.current_chat_id = new_id
+        self.clear_chat_view()
+        self.save_history()
+        self.refresh_sidebar()
+
+    # ---------- NOTEBOOK ----------
     def notebook_new(self):
-        self.current_note_id = str(uuid.uuid4()); self.note_title.delete(0, "end"); self.note_title.insert(0,
-                                                                                                           "Untitled"); self.notebook.delete(
-            "0.0", "end"); self.refresh_notebook_list()
+        self.current_note_id = str(uuid.uuid4())
+        self.note_title.delete(0, "end")
+        self.note_title.insert(0, "Untitled")
+        self.notebook.delete("0.0", "end")
+        self.refresh_notebook_list()
 
     def notebook_save(self):
-        if not self.current_note_id: self.current_note_id = str(uuid.uuid4())
-        db.save_notebook(self.current_note_id, self.current_user, self.note_title.get(),
-                         self.notebook.get("0.0", "end").strip());
+        if not self.current_note_id:
+            self.current_note_id = str(uuid.uuid4())
+        db.save_notebook(self.current_note_id, self.current_user, self.note_title.get().strip() or "Untitled",
+                         self.notebook.get("0.0", "end").strip())
         self.refresh_notebook_list()
 
     def refresh_notebook_list(self):
-        for w in self.notebook_list_frame.winfo_children(): w.destroy()
-        for n in db.load_notebooks_list(self.current_user): ctk.CTkButton(self.notebook_list_frame, text=n[1],
-                                                                          fg_color="transparent", hover_color=BG_CARD,
-                                                                          anchor="w", height=40, corner_radius=20,
-                                                                          command=lambda x=n[0]: self.load_notebook(
-                                                                              x)).pack(fill="x", pady=2)
+        if not hasattr(self, "notebook_list_frame"):
+            return
+        for w in self.notebook_list_frame.winfo_children():
+            w.destroy()
+        if not self.current_user:
+            return
+        for nid, title in db.load_notebooks_list(self.current_user):
+            btn = ctk.CTkButton(
+                self.notebook_list_frame,
+                text=title or "Untitled",
+                fg_color="transparent",
+                hover_color=BG_CARD,
+                anchor="w",
+                height=40,
+                corner_radius=18,
+                command=lambda x=nid: self.load_notebook(x),
+            )
+            btn.pack(fill="x", pady=2, padx=6)
 
-    def load_notebook(self, nid):
-        self.current_note_id = nid; t, c = db.load_notebook_content(nid); self.note_title.delete(0,
-                                                                                                 "end"); self.note_title.insert(
-            0, t); self.notebook.delete("0.0", "end"); self.notebook.insert("0.0", c)
+    def load_notebook(self, nid: str):
+        self.current_note_id = nid
+        t, c = db.load_notebook_content(nid)
+        self.note_title.delete(0, "end")
+        self.note_title.insert(0, t)
+        self.notebook.delete("0.0", "end")
+        self.notebook.insert("0.0", c)
 
-    def notebook_ai_run(self):
-        p = self.note_prompt.get("0.0", "end").strip();
-        if not p or self.note_prompt.has_placeholder: return
-        self.note_prompt.delete("0.0", "end");
-        self.setup_textbox_placeholder(self.note_prompt, "Working...", self.notebook_ai_run)
-        threading.Thread(target=self.run_ai_stream, args=([{"role": "system", "content": f"Editor. Inst: {p}"},
-                                                           {"role": "user",
-                                                            "content": self.notebook.get("0.0", "end")}],
-                                                          self.notebook), daemon=True).start()
+    # ---------- QUICK FIX ----------
+    def start_quick_fix(self, text: str):
+        self.switch_tab("Quick Fix")
+        self.q_result.delete("0.0", "end")
+        threading.Thread(
+            target=self.run_ai_stream,
+            args=([{"role": "system", "content": PROMPTS["Fix"]}, {"role": "user", "content": text}], self.q_result, False),
+            daemon=True,
+        ).start()
 
     def quick_fix_custom_run(self):
-        p = self.q_prompt.get("0.0", "end").strip();
-        t = self.q_result.get("0.0", "end").strip()
-        if not p or self.q_prompt.has_placeholder: return
-        self.q_result.delete("0.0", "end");
-        self.q_prompt.delete("0.0", "end");
-        self.setup_textbox_placeholder(self.q_prompt, "Refining...", self.quick_fix_custom_run)
-        threading.Thread(target=self.run_ai_stream,
-                         args=([{"role": "system", "content": f"Editor. Inst: {p}"}, {"role": "user", "content": t}],
-                               self.q_result), daemon=True).start()
+        instruction = self.q_prompt.get("0.0", "end").strip()
+        if not instruction or getattr(self.q_prompt, "has_placeholder", False):
+            return
+        current = self.q_result.get("0.0", "end").strip()
+        if not current:
+            return
+        self.q_prompt.delete("0.0", "end")
+        self.setup_textbox_placeholder(self.q_prompt, "Custom instruction...", self.quick_fix_custom_run)
 
-    def start_quick_fix(self, text):
-        self.q_result.delete("0.0", "end");
-        self.q_result.insert("end", "Fixing...");
-        self.switch_tab("Quick Fix")
-        threading.Thread(target=self.run_ai_stream,
-                         args=([{"role": "system", "content": PROMPTS["Fix"]}, {"role": "user", "content": text}],
-                               self.q_result), daemon=True).start()
+        threading.Thread(
+            target=self.run_ai_stream,
+            args=(
+                [{"role": "system", "content": f"Editor. Instruction: {instruction}"}, {"role": "user", "content": current}],
+                self.q_result,
+                False,
+            ),
+            daemon=True,
+        ).start()
+
+    # ---------- MODEL / ATTACH ----------
+    def toggle_attach(self):
+        self.attach_notebook_to_chat = not self.attach_notebook_to_chat
+        self.btn_attach.configure(
+            fg_color=HELIX_PURPLE if self.attach_notebook_to_chat else BG_CARD,
+            text_color="black" if self.attach_notebook_to_chat else TEXT_GRAY
+        )
 
     def change_model(self, v):
         self.current_model_key = v
 
-    def show_login(self):
-        self.app_frame.pack_forget(); self.otp_frame.pack_forget(); self.login_frame.pack(fill="both", expand=True)
+    # ---------- PROMPTS ----------
+    def get_system_prompt(self, key: str) -> str:
+        base = PROMPTS.get(key, "")
+        try:
+            mems = db.get_memories(self.current_user)
+            if mems:
+                base += "\nMemories:\n" + "\n".join([m[1] for m in mems])
+        except Exception:
+            pass
 
-    def show_otp(self):
-        self.login_frame.pack_forget(); self.otp_frame.pack(fill="both", expand=True)
-
-    def show_app(self):
-        self.login_frame.pack_forget(); self.otp_frame.pack_forget(); self.app_frame.pack(fill="both",
-                                                                                          expand=True); self.saved_chats = db.load_chats(
-            self.current_user); self.refresh_sidebar(); self.create_new_chat(); self.switch_tab("Talk to AI")
-
-    def do_login(self):
-        email = self.entry_login_email.get();
-        p = self.entry_login_pass.get()
-        success, tokens = db.login(email, p);
-        self.current_user = email;
-        self.token_balance = tokens;
-        save_session(email);
-        self.show_app() if success else messagebox.showerror("Error", "Failed")
-
-    def do_logout(self):
-        clear_session(); self.current_user = None; self.show_login()
-
-    def initiate_otp(self):
-        self.pending_email = self.entry_reg_email.get(); self.pending_pass = self.entry_reg_pass.get(); self.pending_otp = str(
-            random.randint(100000, 999999)); threading.Thread(
-            target=lambda: send_otp_email(self.pending_email, self.pending_otp)).start(); self.show_otp()
-
-    def verify_otp(self):
-        if self.entry_otp.get().strip() == self.pending_otp: db.register_final(self.pending_email,
-                                                                               self.pending_pass); self.current_user = self.pending_email; self.token_balance = INITIAL_TOKENS; save_session(
-            self.current_user); self.show_app()
-
-    def get_system_prompt(self, key):
-        base = PROMPTS[key];
-        mems = db.get_memories(self.current_user)
-        if mems: base += "\nMemories:\n" + "\n".join([m[1] for m in mems])
-        if self.attach_notebook_to_chat and self.current_note_id: base += f"\nNotebook: {db.load_notebook_content(self.current_note_id)[1]}"
+        if self.attach_notebook_to_chat and self.current_note_id:
+            try:
+                base += f"\nNotebook:\n{db.load_notebook_content(self.current_note_id)[1]}"
+            except Exception:
+                pass
         return base
 
-    def send_chat(self, text=None):
-        if not self.check_tokens(): return
-        msg = text if text else self.chat_entry.get("0.0", "end").strip()
-        if not msg or self.chat_entry.has_placeholder: return
-        self.chat_entry.delete("0.0", "end");
+    # ---------- CHAT SEND ----------
+    def send_chat(self, text: str | None = None):
+        msg = text if text is not None else self.chat_entry.get("0.0", "end").strip()
+        if not msg or getattr(self.chat_entry, "has_placeholder", False):
+            return
+
+        if not self.current_chat_id:
+            self.create_new_chat()
+
+        self.chat_entry.delete("0.0", "end")
         self.setup_textbox_placeholder(self.chat_entry, "Ask Helix anything...", self.send_chat)
-        self.welcome_frame.grid_forget();
-        self.chat_box.grid(row=0, column=0, sticky="nsew", padx=120, pady=(40, 100))  # Align with input
-        self.chat_box.insert("end", f"\n\n\n👤 YOU: {msg}\n");
-        self.chat_box.see("end")
+
+        self.add_message("user", msg)
         self.saved_chats[self.current_chat_id]["msgs"].append({"role": "user", "content": msg})
-        if len(self.saved_chats[self.current_chat_id]["msgs"]) == 1: self.saved_chats[self.current_chat_id][
-            "title"] = msg; self.refresh_sidebar()
-        self.save_history();
-        threading.Thread(target=self.run_ai_stream, args=(
-            [{"role": "system", "content": self.get_system_prompt("Chat")}, {"role": "user", "content": msg}],
-            self.chat_box, True), daemon=True).start()
 
-    def create_new_chat(self):
-        new_id = str(uuid.uuid4());
-        self.saved_chats[new_id] = {"title": "New Chat", "msgs": []};
-        self.current_chat_id = new_id;
-        self.chat_box.delete("0.0", "end")
-        self.chat_box.grid_forget();
-        self.welcome_frame.grid(row=0, column=0, sticky="nsew");
-        self.refresh_sidebar()
+        if len(self.saved_chats[self.current_chat_id]["msgs"]) == 1:
+            self._auto_title_chat(self.current_chat_id, msg)
 
-    def refresh_sidebar(self):
-        for w in self.chat_list_frame.winfo_children(): w.destroy()
-        for c_id in reversed(list(self.saved_chats.keys())): ctk.CTkButton(self.chat_list_frame,
-                                                                           text=self.saved_chats[c_id]["title"][
-                                                                                    :20] + "...", anchor="w",
-                                                                           fg_color="transparent", hover_color=BG_CARD,
-                                                                           height=40, corner_radius=20,
-                                                                           font=FONT_NORMAL,
-                                                                           command=lambda x=c_id: self.load_chat(
-                                                                               x)).pack(fill="x", pady=2)
+        self.save_history()
 
-    def load_chat(self, chat_id):
-        self.current_chat_id = chat_id;
-        data = self.saved_chats[chat_id];
-        self.chat_box.delete("0.0", "end")
-        self.welcome_frame.grid_forget();
-        self.chat_box.grid(row=0, column=0, sticky="nsew", padx=120, pady=(40, 100))
-        for m in data["msgs"]: role = "👤 YOU" if m["role"] == "user" else "🧬 HELIX"; self.chat_box.insert("end",
-                                                                                                          f"\n\n\n{role}: {m['content']}\n"); self.chat_box.see(
-            "end")
+        assistant_widget = self.add_message("assistant", "")
 
-    def run_ai_stream(self, msgs, widget, is_chat=False):
+        threading.Thread(
+            target=self.run_ai_stream,
+            args=([{"role": "system", "content": self.get_system_prompt("Chat")}, {"role": "user", "content": msg}], assistant_widget, True),
+            daemon=True,
+        ).start()
+
+    def _auto_title_chat(self, chat_id: str, first_prompt: str):
+        def heuristic_title(text: str) -> str:
+            t = " ".join(text.strip().split())
+            if not t:
+                return "New Chat"
+            if len(t) <= 42:
+                return t
+            return t[:42].rstrip() + "…"
+
+        def generate():
+            title = None
+            try:
+                resp = client.chat.completions.create(
+                    model=MODEL_CONFIG["Standard"]["id"],
+                    messages=[
+                        {"role": "system", "content": "Create a short chat title (2-5 words). Output ONLY the title."},
+                        {"role": "user", "content": first_prompt},
+                    ],
+                    temperature=0.2,
+                    stream=False,
+                    max_tokens=24,
+                )
+                title = (resp.choices[0].message.content or "").strip().strip('"')
+            except Exception:
+                title = None
+
+            if not title:
+                title = heuristic_title(first_prompt)
+
+            def apply():
+                if chat_id in self.saved_chats:
+                    self.saved_chats[chat_id]["title"] = title
+                    self.save_history()
+                    self.refresh_sidebar()
+
+            self.after(0, apply)
+
+        threading.Thread(target=generate, daemon=True).start()
+
+    # ---------- AI STREAM ----------
+    def run_ai_stream(self, msgs, widget, is_chat: bool):
         try:
             full_response = ""
-            if is_chat:
-                self.after(0, lambda: widget.insert("end", "\n\n🧬 HELIX: "))
-            elif not is_chat:
+
+            if isinstance(widget, BubbleMessage):
+                self.after(0, lambda: widget.set_text(""))
+            else:
                 self.after(0, lambda: widget.delete("0.0", "end"))
-            stream = client.chat.completions.create(model=MODEL_CONFIG[self.current_model_key]["id"], messages=msgs,
-                                                    temperature=0.7, stream=True)
+
+            stream = client.chat.completions.create(
+                model=MODEL_CONFIG[self.current_model_key]["id"],
+                messages=msgs,
+                temperature=0.7,
+                stream=True,
+            )
             for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    c = chunk.choices[0].delta.content;
+                delta = chunk.choices[0].delta
+                if hasattr(delta, "content") and delta.content:
+                    c = delta.content
                     full_response += c
-                    self.after(0, lambda x=c: widget.insert("end", x));
-                    self.after(0, lambda: widget.see("end"))
-            if is_chat: self.saved_chats[self.current_chat_id]["msgs"].append(
-                {"role": "assistant", "content": full_response}); self.after(0, self.save_history)
+                    if isinstance(widget, BubbleMessage):
+                        self.after(0, lambda x=c: (widget.append_text(x), self.scroll_chat_to_bottom()))
+                    else:
+                        self.after(0, lambda x=c: widget.insert("end", x))
+
+            if is_chat and self.current_chat_id and isinstance(widget, BubbleMessage):
+                self.saved_chats[self.current_chat_id]["msgs"].append({"role": "assistant", "content": full_response})
+                self.after(0, self.save_history)
+
             self.after(0, lambda: self.charge_tokens_for_words(full_response))
         except Exception as e:
-            self.after(0, lambda: widget.insert("end", f"\n[Error: {e}]"))
+            if isinstance(widget, BubbleMessage):
+                self.after(0, lambda: widget.set_text(f"[Error: {e}]"))
+            else:
+                self.after(0, lambda: widget.insert("end", f"\n[Error: {e}]"))
 
-    def check_tokens(self):
-        return True
-
-    def charge_tokens_for_words(self, text):
-        c = len(text.split()) * MODEL_CONFIG[self.current_model_key]["cost_multiplier"]
+    def charge_tokens_for_words(self, text: str):
+        c = len(text.split()) * int(MODEL_CONFIG[self.current_model_key]["cost_multiplier"])
         self.token_balance = db.deduct_tokens(self.current_user, c)
 
-    def show_window(self, mode):
-        self.deiconify();
-        self.attributes("-topmost", True)
-        if not self.current_user: self.show_login(); return
-        if mode == "clipboard": self.start_quick_fix(pyperclip.paste())
+    # ---------- NOTEBOOK AI ----------
+    def notebook_ai_run(self):
+        p = self.note_prompt.get("0.0", "end").strip()
+        if not p or getattr(self.note_prompt, "has_placeholder", False):
+            return
+        self.note_prompt.delete("0.0", "end")
+        self.setup_textbox_placeholder(self.note_prompt, "Instruct Helix to edit...", self.notebook_ai_run)
 
+        threading.Thread(
+            target=self.run_ai_stream,
+            args=(
+                [{"role": "system", "content": f"Editor. Inst: {p}"}, {"role": "user", "content": self.notebook.get('0.0', 'end')}],
+                self.notebook,
+                False,
+            ),
+            daemon=True,
+        ).start()
+
+    # ---------- WIDGET ENTRY ----------
+    def show_window(self, mode: str):
+        self.deiconify()
+        self.attributes("-topmost", True)
+        if not self.current_user:
+            self.show_login()
+            return
+        if mode == "clipboard":
+            self.start_quick_fix(pyperclip.paste())
+
+    # ---------- PERSIST ----------
     def save_history(self):
-        db.save_chats(self.current_user, self.saved_chats)
+        if self.current_user:
+            db.save_chats(self.current_user, self.saved_chats)
+
 
 if __name__ == "__main__":
+    # If you pasted secrets into code (tokens/passwords), rotate them and move to env vars.
     app = HelixApp()
     app.mainloop()
