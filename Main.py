@@ -957,14 +957,19 @@ class HelixApp(ctk.CTk):
             pass
         ctk.CTkLabel(logo_row, text="HELIX", font=FONT_HEADER, text_color=TEXT_WHITE).pack(side="left", padx=12)
 
-        # New chat
-        ctk.CTkButton(self.sidebar, text="+ New Chat", fg_color=BG_CARD, hover_color=BG_INPUT, height=50, corner_radius=25,
-                      font=FONT_BOLD, text_color=TEXT_GRAY, command=self.create_new_chat).pack(fill="x", padx=20, pady=(5, 10))
+        # Primary Actions
+        action_row = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        action_row.pack(fill="x", padx=20, pady=(5, 15))
 
-        ctk.CTkLabel(self.sidebar, text="Recent", font=FONT_SMALL, text_color=TEXT_GRAY).pack(anchor="w", padx=25, pady=(14, 6))
+        ctk.CTkButton(action_row, text="+ Chat", fg_color=BG_CARD, hover_color=BG_INPUT, width=110, height=40, corner_radius=20,
+                      font=FONT_BOLD, text_color=TEXT_GRAY, command=self.create_new_chat).pack(side="left", padx=(0, 5))
 
-        self.chat_list_frame = ctk.CTkScrollableFrame(self.sidebar, fg_color="transparent")
-        self.chat_list_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        ctk.CTkButton(action_row, text="+ Canvas", fg_color=BG_CARD, hover_color=BG_INPUT, width=110, height=40, corner_radius=20,
+                      font=FONT_BOLD, text_color=TEXT_GRAY, command=self.notebook_new).pack(side="right", padx=(5, 0))
+
+        # LIBRARY SCROLL
+        self.library_scroll = ctk.CTkScrollableFrame(self.sidebar, fg_color="transparent")
+        self.library_scroll.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         footer = ctk.CTkFrame(self.sidebar, fg_color="transparent", height=60)
         footer.pack(fill="x", side="bottom", padx=20, pady=18)
@@ -995,7 +1000,7 @@ class HelixApp(ctk.CTk):
 
         self.pages: dict[str, ctk.CTkFrame] = {}
         self.pages["Talk to AI"] = ctk.CTkFrame(self.pages_container, fg_color=BG_DARK)
-        self.pages["Notebook"] = ctk.CTkFrame(self.pages_container, fg_color=BG_DARK)
+        self.pages["Canvas"] = ctk.CTkFrame(self.pages_container, fg_color=BG_DARK)
         self.pages["Quick Fix"] = ctk.CTkFrame(self.pages_container, fg_color=BG_DARK)
 
         # Init pages (hidden or placed)
@@ -1003,7 +1008,7 @@ class HelixApp(ctk.CTk):
             p.place(relx=1.0, rely=0, relwidth=1, relheight=1) # Start off-screen right
 
         self._setup_talk_page(self.pages["Talk to AI"])
-        self._setup_notebook_page(self.pages["Notebook"])
+        self._setup_notebook_page(self.pages["Canvas"])
         self._setup_quickfix_page(self.pages["Quick Fix"])
 
         # Bottom nav pill
@@ -1028,7 +1033,7 @@ class HelixApp(ctk.CTk):
             self.nav_buttons[name] = b
 
         make_nav_btn("Talk to AI", 120)
-        make_nav_btn("Notebook", 105)
+        make_nav_btn("Canvas", 105)
         make_nav_btn("Quick Fix", 110)
 
         self.widget = FloatingWidget(self)
@@ -1044,16 +1049,43 @@ class HelixApp(ctk.CTk):
         self.welcome_frame.grid(row=0, column=0, sticky="nsew")
 
         center = ctk.CTkFrame(self.welcome_frame, fg_color="transparent")
-        center.place(relx=0.5, rely=0.40, anchor="center")
+        center.place(relx=0.5, rely=0.45, anchor="center")
 
         try:
-            icon = ctk.CTkImage(light_image=Image.open(asset_path(LOGO_FILENAME)), size=(70, 70))
-            ctk.CTkLabel(center, text="", image=icon).pack(pady=10)
+            icon = ctk.CTkImage(light_image=Image.open(asset_path(LOGO_FILENAME)), size=(80, 80))
+            ctk.CTkLabel(center, text="", image=icon).pack(pady=(0, 20))
         except Exception:
             pass
 
-        ctk.CTkLabel(center, text="Hello", font=("Google Sans", 36), text_color="white").pack(pady=5)
-        ctk.CTkLabel(center, text="How can I help you today?", font=("Google Sans", 20), text_color=TEXT_GRAY).pack(pady=0)
+        ctk.CTkLabel(center, text="How can I help?", font=("Google Sans", 32, "bold"), text_color="white").pack(pady=5)
+
+        # Suggestions grid
+        sugg_frame = ctk.CTkFrame(center, fg_color="transparent")
+        sugg_frame.pack(pady=30)
+
+        suggestions = [
+            ("Draft an email", "to my boss about a raise"),
+            ("Debug code", "in my python script"),
+            ("Plan a trip", "to Kyoto in the spring"),
+            ("Brainstorm", "marketing ideas for a coffee shop")
+        ]
+
+        for i, (head, sub) in enumerate(suggestions):
+            btn = ctk.CTkButton(
+                sugg_frame,
+                text=f"{head}\n{sub}",
+                font=FONT_NORMAL,
+                fg_color=BG_CARD,
+                hover_color=BG_INPUT,
+                width=160,
+                height=80,
+                corner_radius=15,
+                anchor="nw",
+                command=lambda t=f"{head} {sub}": self.chat_entry_insert(t)
+            )
+            # Simple grid layout for suggestions 2x2
+            r, c = divmod(i, 2)
+            btn.grid(row=r, column=c, padx=8, pady=8)
 
         # chat scroll (hidden until messages)
         self.chat_scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
@@ -1121,26 +1153,17 @@ class HelixApp(ctk.CTk):
         tab.bind("<Configure>", on_resize)
 
     def _setup_notebook_page(self, tab: ctk.CTkFrame):
-        tab.grid_columnconfigure(0, weight=0)
-        tab.grid_columnconfigure(1, weight=1)
+        # Renamed visual to "Canvas" but internal logic remains notebook-based for now
+        tab.grid_columnconfigure(0, weight=1) # Full width editor
         tab.grid_rowconfigure(0, weight=1)
 
-        list_frame = ctk.CTkFrame(tab, width=240, fg_color=BG_SIDEBAR, corner_radius=20)
-        list_frame.grid(row=0, column=0, sticky="nsew", padx=(20, 15), pady=(20, 90))  # bottom padding for nav
-        list_frame.grid_propagate(False)
-
-        ctk.CTkButton(list_frame, text="+ New Page", fg_color=BG_CARD, hover_color=BG_INPUT, height=45, corner_radius=22,
-                      command=self.notebook_new).pack(fill="x", padx=15, pady=15)
-
-        self.notebook_list_frame = ctk.CTkScrollableFrame(list_frame, fg_color="transparent")
-        self.notebook_list_frame.pack(fill="both", expand=True, padx=8, pady=(0, 10))
-
+        # We removed the list frame from here because it's moving to the Sidebar
         editor = ctk.CTkFrame(tab, fg_color=BG_INPUT, corner_radius=20)
-        editor.grid(row=0, column=1, sticky="nsew", padx=(0, 20), pady=(20, 90))  # bottom padding for nav
+        editor.grid(row=0, column=0, sticky="nsew", padx=20, pady=(20, 90))  # bottom padding for nav
         editor.grid_rowconfigure(1, weight=1)
         editor.grid_columnconfigure(0, weight=1)
 
-        self.note_title = ctk.CTkEntry(editor, font=FONT_HEADER, fg_color="transparent", border_width=0, placeholder_text="Untitled")
+        self.note_title = ctk.CTkEntry(editor, font=FONT_HEADER, fg_color="transparent", border_width=0, placeholder_text="Untitled Canvas")
         self.note_title.grid(row=0, column=0, sticky="ew", padx=30, pady=(20, 10))
 
         ctk.CTkButton(editor, text="Save", width=70, height=35, corner_radius=17, fg_color=BG_CARD, hover_color=BG_DARK,
@@ -1154,7 +1177,7 @@ class HelixApp(ctk.CTk):
 
         self.note_prompt = ctk.CTkTextbox(ai_bar, height=35, fg_color="transparent", font=FONT_INPUT, wrap="word")
         self.note_prompt.pack(side="left", fill="x", expand=True, padx=20, pady=12)
-        self.setup_textbox_placeholder(self.note_prompt, "Instruct Helix to edit...", self.notebook_ai_run)
+        self.setup_textbox_placeholder(self.note_prompt, "Describe changes or content to generate...", self.notebook_ai_run)
 
         ctk.CTkButton(ai_bar, text="Generate", width=90, height=40, corner_radius=20, fg_color=HELIX_PURPLE, text_color="black",
                       command=self.notebook_ai_run).pack(side="right", padx=10)
@@ -1177,11 +1200,18 @@ class HelixApp(ctk.CTk):
                       command=self.quick_fix_custom_run).pack(side="right", padx=12)
 
     # ---------- TAB / NAV ----------
+    def chat_entry_insert(self, text):
+        self.chat_entry.delete("0.0", "end")
+        self.chat_entry.insert("0.0", text)
+        self.chat_entry.configure(text_color=TEXT_WHITE)
+        self.chat_entry.has_placeholder = False
+        self.chat_entry.focus_force()
+
     def switch_tab(self, tab_name: str):
         if tab_name == self.active_tab: return
 
         # Decide direction
-        order = ["Talk to AI", "Notebook", "Quick Fix"]
+        order = ["Talk to AI", "Canvas", "Quick Fix"]
         try:
             curr_idx = order.index(self.active_tab)
             new_idx = order.index(tab_name)
@@ -1195,7 +1225,8 @@ class HelixApp(ctk.CTk):
         self.active_tab = tab_name
         self.animate_slide_page(old_frame, new_frame, direction)
 
-        if tab_name == "Talk to AI":
+        # Sidebar visible on both Talk and Canvas now (Unified Library)
+        if tab_name in ["Talk to AI", "Canvas"]:
             self.sidebar.grid()
         else:
             self.sidebar.grid_remove()
@@ -1316,32 +1347,55 @@ class HelixApp(ctk.CTk):
         save_session(self.current_user)
         self.show_app()
 
-    # ---------- SIDEBAR / CHAT LIST ----------
+    # ---------- SIDEBAR / LIBRARY ----------
     def refresh_sidebar(self):
-        for w in self.chat_list_frame.winfo_children():
+        for w in self.library_scroll.winfo_children():
             w.destroy()
+
+        # CHATS SECTION
+        ctk.CTkLabel(self.library_scroll, text="CHATS", font=("Google Sans", 11, "bold"), text_color="#555").pack(anchor="w", padx=15, pady=(10, 5))
 
         ids = list(self.saved_chats.keys())[::-1]
         for c_id in ids:
             title = self.saved_chats[c_id].get("title", "New Chat")
             title = str(title).strip() or "New Chat"
-            display = title if len(title) <= 28 else title[:28] + "…"
+            display = title if len(title) <= 24 else title[:24] + "…"
 
             btn = ctk.CTkButton(
-                self.chat_list_frame,
-                text=display,
+                self.library_scroll,
+                text="💬 " + display,
                 anchor="w",
                 fg_color="transparent",
                 hover_color=BG_CARD,
-                height=40,
-                corner_radius=18,
+                height=35,
+                corner_radius=8,
                 font=FONT_NORMAL,
+                text_color="#CCC",
                 command=lambda x=c_id: self.load_chat(x),
             )
-            btn.pack(fill="x", pady=2, padx=6)
-
+            btn.pack(fill="x", pady=1, padx=6)
             btn.bind("<Button-3>", lambda e, cid=c_id: self.show_chat_context_menu(e, cid))
-            btn.bind("<Button-2>", lambda e, cid=c_id: self.show_chat_context_menu(e, cid))
+
+        # CANVAS SECTION
+        ctk.CTkLabel(self.library_scroll, text="CANVASES", font=("Google Sans", 11, "bold"), text_color="#555").pack(anchor="w", padx=15, pady=(20, 5))
+
+        if self.current_user:
+            notebooks = db.load_notebooks_list(self.current_user)
+            for nid, title in notebooks:
+                display = title or "Untitled"
+                btn = ctk.CTkButton(
+                    self.library_scroll,
+                    text="📝 " + display,
+                    anchor="w",
+                    fg_color="transparent",
+                    hover_color=BG_CARD,
+                    height=35,
+                    corner_radius=8,
+                    font=FONT_NORMAL,
+                    text_color="#CCC",
+                    command=lambda x=nid: self.load_notebook(x),
+                )
+                btn.pack(fill="x", pady=1, padx=6)
 
     def show_chat_context_menu(self, event, chat_id: str):
         menu = tk.Menu(self, tearoff=0)
@@ -1432,6 +1486,7 @@ class HelixApp(ctk.CTk):
         self.note_title.insert(0, "Untitled")
         self.notebook.delete("0.0", "end")
         self.refresh_notebook_list()
+        self.switch_tab("Canvas") # Auto switch to canvas when created
 
     def notebook_save(self):
         if not self.current_note_id:
@@ -1441,24 +1496,8 @@ class HelixApp(ctk.CTk):
         self.refresh_notebook_list()
 
     def refresh_notebook_list(self):
-        if not hasattr(self, "notebook_list_frame"):
-            return
-        for w in self.notebook_list_frame.winfo_children():
-            w.destroy()
-        if not self.current_user:
-            return
-        for nid, title in db.load_notebooks_list(self.current_user):
-            btn = ctk.CTkButton(
-                self.notebook_list_frame,
-                text=title or "Untitled",
-                fg_color="transparent",
-                hover_color=BG_CARD,
-                anchor="w",
-                height=40,
-                corner_radius=18,
-                command=lambda x=nid: self.load_notebook(x),
-            )
-            btn.pack(fill="x", pady=2, padx=6)
+        # Now handled by refresh_sidebar since it's the unified library
+        self.refresh_sidebar()
 
     def load_notebook(self, nid: str):
         self.current_note_id = nid
@@ -1467,6 +1506,7 @@ class HelixApp(ctk.CTk):
         self.note_title.insert(0, t)
         self.notebook.delete("0.0", "end")
         self.notebook.insert("0.0", c)
+        self.switch_tab("Canvas")
 
     # ---------- QUICK FIX ----------
     def start_quick_fix(self, text: str):
