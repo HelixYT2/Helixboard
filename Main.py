@@ -209,6 +209,27 @@ class DatabaseManager:
                 avatar_color TEXT
             )
         """)
+        # DM Tables
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS contacts (
+                id TEXT PRIMARY KEY,
+                user_email TEXT,
+                name TEXT,
+                avatar_color TEXT,
+                last_msg TEXT,
+                updated_at TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS dm_messages (
+                id TEXT PRIMARY KEY,
+                contact_id TEXT,
+                role TEXT,
+                content TEXT,
+                timestamp TEXT,
+                is_draft INTEGER
+            )
+        """)
         conn.commit()
         conn.close()
 
@@ -351,6 +372,37 @@ class DatabaseManager:
         conn.commit()
         conn.close()
 
+    # --- DM METHODS ---
+    def get_contacts(self, email):
+        conn = sqlite3.connect(self.path)
+        res = conn.cursor().execute("SELECT id, name, last_msg FROM contacts WHERE user_email=? ORDER BY updated_at DESC", (email,)).fetchall()
+        conn.close()
+        return res
+
+    def add_contact(self, email, name):
+        conn = sqlite3.connect(self.path)
+        cid = str(uuid.uuid4())
+        conn.cursor().execute("INSERT INTO contacts VALUES (?, ?, ?, ?, ?, ?)", (cid, email, name, "#555", "New Chat", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+        return cid
+
+    def get_dm_messages(self, contact_id):
+        conn = sqlite3.connect(self.path)
+        res = conn.cursor().execute("SELECT role, content, is_draft FROM dm_messages WHERE contact_id=? ORDER BY timestamp ASC", (contact_id,)).fetchall()
+        conn.close()
+        return res
+
+    def save_dm_message(self, contact_id, role, content, is_draft=0):
+        conn = sqlite3.connect(self.path)
+        mid = str(uuid.uuid4())
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn.cursor().execute("INSERT INTO dm_messages VALUES (?, ?, ?, ?, ?, ?)", (mid, contact_id, role, content, ts, is_draft))
+        if not is_draft:
+            conn.cursor().execute("UPDATE contacts SET last_msg=?, updated_at=? WHERE id=?", (content[:30], ts, contact_id))
+        conn.commit()
+        conn.close()
+
 
 # =========================
 # AI CLIENT
@@ -443,6 +495,76 @@ class FloatingWidget(ctk.CTkToplevel):
         self.hide_timer = self.after(10000, lambda: self.attributes("-alpha", 0.05))
 
 # =========================
+# CANVAS DRAFTING OVERLAY
+# =========================
+
+class CanvasDraftingOverlay(ctk.CTkFrame):
+    def __init__(self, parent_widget, controller, initial_text):
+        super().__init__(parent_widget, fg_color=BG_DARK, corner_radius=0)
+        self.app = controller
+        self.initial_text = initial_text
+
+        self.grid_columnconfigure(0, weight=1) # Left: Instructions
+        self.grid_columnconfigure(1, weight=2) # Right: Final Output
+        self.grid_rowconfigure(0, weight=1)
+
+        # LEFT PANE: Instructions
+        left_pane = ctk.CTkFrame(self, fg_color=BG_SIDEBAR, corner_radius=0)
+        left_pane.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
+
+        ctk.CTkLabel(left_pane, text="INSTRUCTIONS", font=FONT_BOLD, text_color="#AAA").pack(anchor="w", padx=20, pady=20)
+
+        self.chat_scroll = ctk.CTkScrollableFrame(left_pane, fg_color="transparent")
+        self.chat_scroll.pack(fill="both", expand=True, padx=10)
+
+        # Instruction Input
+        inp_frame = ctk.CTkFrame(left_pane, fg_color=BG_INPUT, height=100)
+        inp_frame.pack(fill="x", side="bottom", padx=15, pady=20)
+
+        self.inp_box = ctk.CTkTextbox(inp_frame, height=60, fg_color="transparent")
+        self.inp_box.pack(fill="x", pady=10, padx=10)
+        self.inp_box.insert("0.0", "Describe what you want to write...")
+
+        ctk.CTkButton(inp_frame, text="Update Draft", fg_color=HELIX_PURPLE, text_color="black", command=self.run_draft).pack(fill="x", pady=(0, 10), padx=10)
+
+        # RIGHT PANE: Final Output
+        right_pane = ctk.CTkFrame(self, fg_color=BG_DARK, corner_radius=0)
+        right_pane.grid(row=0, column=1, sticky="nsew")
+
+        header = ctk.CTkFrame(right_pane, fg_color="transparent", height=50)
+        header.pack(fill="x", padx=20, pady=20)
+        ctk.CTkLabel(header, text="DRAFT PREVIEW", font=FONT_BOLD, text_color="#AAA").pack(side="left")
+
+        ctk.CTkButton(header, text="Insert into Notebook", width=140, fg_color=HELIX_PURPLE, text_color="black", command=self.insert_and_close).pack(side="right")
+        ctk.CTkButton(header, text="Cancel", width=80, fg_color="transparent", border_width=1, border_color="#555", command=self.close).pack(side="right", padx=10)
+
+        self.preview_box = ctk.CTkTextbox(right_pane, font=FONT_NORMAL, fg_color=BG_INPUT)
+        self.preview_box.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        self.preview_box.insert("0.0", initial_text)
+
+    def run_draft(self):
+        inst = self.inp_box.get("0.0", "end").strip()
+        current = self.preview_box.get("0.0", "end").strip()
+
+        # Add user msg to left
+        lbl = ctk.CTkLabel(self.chat_scroll, text=inst, fg_color=BG_CARD, corner_radius=10, padx=10, pady=5, anchor="w", justify="left")
+        lbl.pack(fill="x", pady=5)
+
+        # Stub AI generation
+        # Real impl would stream here
+        self.preview_box.insert("end", "\n\n[AI would update draft here based on instruction...]")
+
+    def insert_and_close(self):
+        final_text = self.preview_box.get("0.0", "end").strip()
+        self.app.notebook.delete("0.0", "end")
+        self.app.notebook.insert("0.0", final_text)
+        self.close()
+
+    def close(self):
+        self.app.animate_overlay_close(self)
+        self.app.canvas_overlay = None
+
+# =========================
 # SETTINGS OVERLAY (ANIMATED)
 # =========================
 
@@ -473,6 +595,7 @@ class SettingsOverlay(ctk.CTkFrame):
 
         # Tabs
         self.create_nav_btn("Profile", "Profile")
+        self.create_nav_btn("Context", "Context")
         self.create_nav_btn("Personalization", "Personalization")
         self.create_nav_btn("General", "General")
 
@@ -548,6 +671,8 @@ class SettingsOverlay(ctk.CTkFrame):
 
         if page == "Profile":
             self.build_profile_page()
+        elif page == "Context":
+            self.build_context_page()
         elif page == "Personalization":
             self.build_personalization_page()
         elif page == "General":
@@ -579,6 +704,34 @@ class SettingsOverlay(ctk.CTkFrame):
         bio = self.entry_bio.get("0.0", "end").strip()
         self.db.save_profile(self.current_user, dn, bio)
         messagebox.showinfo("Success", "Profile updated!")
+
+    def build_context_page(self):
+        ctk.CTkLabel(self.content, text="Notebook Context (RAG)", font=FONT_SUBHEADER).pack(anchor="w", pady=(10, 10))
+        ctk.CTkLabel(self.content, text="Enable this to let Helix read your notebooks to answer questions.", text_color=TEXT_GRAY).pack(anchor="w", pady=(0, 20))
+
+        self.var_context_active = ctk.BooleanVar(value=self.app.use_notebook_context)
+
+        def toggle_ctx():
+            self.app.use_notebook_context = self.var_context_active.get()
+
+        ctk.CTkSwitch(self.content, text="Enable Notebook Context", variable=self.var_context_active, command=toggle_ctx, progress_color=HELIX_PURPLE).pack(anchor="w", pady=10)
+
+        ctk.CTkLabel(self.content, text="Available Notebooks:", font=FONT_BOLD).pack(anchor="w", pady=(20, 10))
+
+        # List of notebooks
+        scroll = ctk.CTkScrollableFrame(self.content, fg_color="transparent", height=300)
+        scroll.pack(fill="both", expand=True)
+
+        notebooks = self.db.load_notebooks_list(self.current_user)
+        if not notebooks:
+            ctk.CTkLabel(scroll, text="No notebooks found.", text_color="gray").pack(pady=20)
+
+        for nid, title in notebooks:
+            # For now, all are included if enabled. Later: individual selection.
+            row = ctk.CTkFrame(scroll, fg_color=BG_CARD)
+            row.pack(fill="x", pady=2)
+            ctk.CTkLabel(row, text="📓 " + (title or "Untitled"), anchor="w").pack(side="left", padx=10, pady=5)
+            ctk.CTkLabel(row, text="Active", text_color="#555", font=FONT_SMALL).pack(side="right", padx=10)
 
     def build_personalization_page(self):
         ctk.CTkLabel(self.content, text="Memories (Max 65)", font=FONT_SUBHEADER).pack(anchor="w", pady=(10, 10))
@@ -645,6 +798,7 @@ class BubbleMessage:
 
     def __init__(self, parent, role: str, text: str, max_width_px: int):
         self.role = role
+        self.text = text
         self.container = ctk.CTkFrame(parent, fg_color="transparent")
         self.container.grid_columnconfigure(0, weight=1)
 
@@ -659,50 +813,82 @@ class BubbleMessage:
                 border_width=1,
                 border_color=HELIX_PURPLE,
             )
-            # For very short messages, keep a minimum width so it doesn't look like a weird tic-tac.
-            if len(text.strip()) <= 8:
-                self.bubble.configure(width=140)
-                self.bubble.grid_propagate(False)
-
-            self.label = ctk.CTkLabel(
+            # Use Textbox for copy/selectability
+            self.textbox = ctk.CTkTextbox(
                 self.bubble,
-                text=text,
                 font=FONT_NORMAL,
                 text_color=TEXT_WHITE,
-                justify="left",
-                wraplength=max_width_px,
+                fg_color="transparent",
+                wrap="word",
+                height=0, # Auto-height hack requires manual calc, but CTkTextbox is better than Label for this
+                activate_scrollbars=False
             )
-            self.label.pack(padx=16, pady=10)
+            self.textbox.insert("0.0", text)
+            self.textbox.configure(state="disabled")
+            self.textbox.pack(padx=12, pady=8, fill="both", expand=True)
 
             self.bubble.grid(row=0, column=0, sticky="e", padx=(80, 0), pady=10)
 
         else:
-            # assistant: "ChatGPT-like" text block (no obvious header)
+            # assistant: text block + actions
             self.bubble = ctk.CTkFrame(self.container, fg_color="transparent")
-            self.label = ctk.CTkLabel(
+
+            self.textbox = ctk.CTkTextbox(
                 self.bubble,
-                text=text,
                 font=FONT_NORMAL,
                 text_color=TEXT_WHITE,
-                justify="left",
-                wraplength=max_width_px,
+                fg_color="transparent",
+                wrap="word",
+                height=0,
+                activate_scrollbars=False
             )
-            self.label.pack(anchor="w")
-            self.bubble.grid(row=0, column=0, sticky="w", padx=(0, 80), pady=12)
+            self.textbox.insert("0.0", text)
+            self.textbox.configure(state="disabled")
+            self.textbox.pack(anchor="w", fill="x", expand=True)
+
+            # Action Row (Copy / Edit)
+            self.actions = ctk.CTkFrame(self.bubble, fg_color="transparent", height=30)
+            self.actions.pack(anchor="w", pady=(5, 0))
+
+            ctk.CTkButton(self.actions, text="📄", width=30, height=30, fg_color="transparent", hover_color=BG_INPUT, command=self.copy_text).pack(side="left", padx=(0, 5))
+
+            self.bubble.grid(row=0, column=0, sticky="ew", padx=(0, 40), pady=12)
+
+        # Initial size calc
+        self.resize_textbox()
+
+    def resize_textbox(self):
+        # Rough calc: lines * line_height
+        # This is a heuristic because CTkTextbox auto-sizing is tricky
+        lines = self.text.count('\n') + (len(self.text) / 60) # approx chars per line
+        h = max(40, int(lines * 24) + 20)
+        self.textbox.configure(height=h)
 
     def grid(self, row: int):
         self.container.grid(row=row, column=0, sticky="ew")
         return self
 
     def set_text(self, txt: str):
-        self.label.configure(text=txt)
+        self.text = txt
+        self.textbox.configure(state="normal")
+        self.textbox.delete("0.0", "end")
+        self.textbox.insert("0.0", txt)
+        self.textbox.configure(state="disabled")
+        self.resize_textbox()
 
     def append_text(self, more: str):
-        self.label.configure(text=self.label.cget("text") + more)
+        self.text += more
+        self.textbox.configure(state="normal")
+        self.textbox.insert("end", more)
+        self.textbox.configure(state="disabled")
+        self.resize_textbox()
 
     def set_wraplength(self, px: int):
-        self.max_width_px = px
-        self.label.configure(wraplength=px)
+        # CTkTextbox handles wrapping automatically via width
+        pass
+
+    def copy_text(self):
+        pyperclip.copy(self.text)
 
 # =========================
 # MAIN APP
@@ -725,6 +911,7 @@ class HelixApp(ctk.CTk):
         self.current_model_key = "Standard"
         self.current_note_id: str | None = None
         self.attach_notebook_to_chat = False
+        self.use_notebook_context = False # Global context toggle
 
         self.active_tab = "Talk to AI"
 
@@ -1001,6 +1188,7 @@ class HelixApp(ctk.CTk):
         self.pages: dict[str, ctk.CTkFrame] = {}
         self.pages["Talk to AI"] = ctk.CTkFrame(self.pages_container, fg_color=BG_DARK)
         self.pages["Canvas"] = ctk.CTkFrame(self.pages_container, fg_color=BG_DARK)
+        self.pages["Messages"] = ctk.CTkFrame(self.pages_container, fg_color=BG_DARK)
         self.pages["Quick Fix"] = ctk.CTkFrame(self.pages_container, fg_color=BG_DARK)
 
         # Init pages (hidden or placed)
@@ -1009,6 +1197,7 @@ class HelixApp(ctk.CTk):
 
         self._setup_talk_page(self.pages["Talk to AI"])
         self._setup_notebook_page(self.pages["Canvas"])
+        self._setup_dm_page(self.pages["Messages"])
         self._setup_quickfix_page(self.pages["Quick Fix"])
 
         # Bottom nav pill
@@ -1032,9 +1221,10 @@ class HelixApp(ctk.CTk):
             b.pack(side="left", padx=6, pady=5)
             self.nav_buttons[name] = b
 
-        make_nav_btn("Talk to AI", 120)
-        make_nav_btn("Canvas", 105)
-        make_nav_btn("Quick Fix", 110)
+        make_nav_btn("Talk to AI", 110)
+        make_nav_btn("Canvas", 100)
+        make_nav_btn("Messages", 110)
+        make_nav_btn("Quick Fix", 100)
 
         self.widget = FloatingWidget(self)
 
@@ -1166,21 +1356,142 @@ class HelixApp(ctk.CTk):
         self.note_title = ctk.CTkEntry(editor, font=FONT_HEADER, fg_color="transparent", border_width=0, placeholder_text="Untitled Canvas")
         self.note_title.grid(row=0, column=0, sticky="ew", padx=30, pady=(20, 10))
 
-        ctk.CTkButton(editor, text="Save", width=70, height=35, corner_radius=17, fg_color=BG_CARD, hover_color=BG_DARK,
-                      command=self.notebook_save).grid(row=0, column=1, padx=30, pady=(20,10))
+        btn_row = ctk.CTkFrame(editor, fg_color="transparent")
+        btn_row.grid(row=0, column=1, padx=30, pady=(20, 10))
+
+        ctk.CTkButton(btn_row, text="Draft Mode", width=90, height=35, corner_radius=17, fg_color=BG_CARD, hover_color=BG_DARK,
+                      command=self.open_canvas_drafting).pack(side="left", padx=5)
+
+        ctk.CTkButton(btn_row, text="Save", width=70, height=35, corner_radius=17, fg_color=BG_CARD, hover_color=BG_DARK,
+                      command=self.notebook_save).pack(side="left", padx=5)
 
         self.notebook = ctk.CTkTextbox(editor, font=FONT_NORMAL, fg_color="transparent", wrap="word")
         self.notebook.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=30, pady=(0, 0))
 
+        # Standard AI bar (still useful for quick edits)
         ai_bar = ctk.CTkFrame(editor, fg_color=BG_CARD, height=60, corner_radius=30)
         ai_bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=30, pady=20)
 
         self.note_prompt = ctk.CTkTextbox(ai_bar, height=35, fg_color="transparent", font=FONT_INPUT, wrap="word")
         self.note_prompt.pack(side="left", fill="x", expand=True, padx=20, pady=12)
-        self.setup_textbox_placeholder(self.note_prompt, "Describe changes or content to generate...", self.notebook_ai_run)
+        self.setup_textbox_placeholder(self.note_prompt, "Quick edit...", self.notebook_ai_run)
 
-        ctk.CTkButton(ai_bar, text="Generate", width=90, height=40, corner_radius=20, fg_color=HELIX_PURPLE, text_color="black",
+        ctk.CTkButton(ai_bar, text="Run", width=60, height=40, corner_radius=20, fg_color=HELIX_PURPLE, text_color="black",
                       command=self.notebook_ai_run).pack(side="right", padx=10)
+
+        # Drafting Overlay
+        self.canvas_overlay = None
+
+    def open_canvas_drafting(self):
+        if self.canvas_overlay: return
+        self.canvas_overlay = CanvasDraftingOverlay(self.pages["Canvas"], self, self.notebook.get("0.0", "end").strip())
+        self.animate_overlay_open(self.canvas_overlay)
+
+    def _setup_dm_page(self, tab: ctk.CTkFrame):
+        tab.grid_columnconfigure(0, weight=0) # Thread list
+        tab.grid_columnconfigure(1, weight=1) # Chat area
+        tab.grid_columnconfigure(2, weight=0) # Draft panel (toggleable)
+        tab.grid_rowconfigure(0, weight=1)
+
+        # LEFT: Thread List
+        self.dm_list = ctk.CTkFrame(tab, width=220, fg_color=BG_SIDEBAR, corner_radius=0)
+        self.dm_list.grid(row=0, column=0, sticky="nsew")
+        self.dm_list.grid_propagate(False)
+
+        ctk.CTkLabel(self.dm_list, text="Messages", font=FONT_BOLD).pack(pady=20)
+        ctk.CTkButton(self.dm_list, text="+ New DM", width=180, height=35, fg_color=BG_CARD, command=self.dm_new_contact).pack(pady=10)
+
+        self.dm_scroll = ctk.CTkScrollableFrame(self.dm_list, fg_color="transparent")
+        self.dm_scroll.pack(fill="both", expand=True)
+
+        # CENTER: Chat
+        self.dm_chat_area = ctk.CTkFrame(tab, fg_color=BG_DARK, corner_radius=0)
+        self.dm_chat_area.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
+        self.dm_chat_area.grid_rowconfigure(0, weight=1)
+        self.dm_chat_area.grid_columnconfigure(0, weight=1)
+
+        self.dm_msgs_scroll = ctk.CTkScrollableFrame(self.dm_chat_area, fg_color="transparent")
+        self.dm_msgs_scroll.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
+
+        self.dm_input = ctk.CTkTextbox(self.dm_chat_area, height=60, font=FONT_NORMAL)
+        self.dm_input.grid(row=1, column=0, sticky="ew")
+
+        btn_row = ctk.CTkFrame(self.dm_chat_area, fg_color="transparent")
+        btn_row.grid(row=2, column=0, sticky="ew", pady=10)
+
+        ctk.CTkButton(btn_row, text="Draft with AI ✨", width=120, fg_color=BG_CARD, command=self.dm_toggle_draft).pack(side="left")
+        ctk.CTkButton(btn_row, text="Send", width=80, fg_color=HELIX_PURPLE, text_color="black", command=self.dm_send).pack(side="right")
+
+        # RIGHT: Draft Panel (Hidden by default)
+        self.dm_draft_panel = ctk.CTkFrame(tab, width=250, fg_color=BG_SIDEBAR, corner_radius=0)
+        # Grid it later when toggled
+
+        self.dm_current_contact = None
+        self.dm_draft_visible = False
+
+    def dm_new_contact(self):
+        # Stub: just add a fake one for now
+        cid = db.add_contact(self.current_user, f"User {random.randint(100,999)}")
+        self.dm_refresh_list()
+        self.dm_load_thread(cid)
+
+    def dm_refresh_list(self):
+        for w in self.dm_scroll.winfo_children(): w.destroy()
+        contacts = db.get_contacts(self.current_user)
+        for cid, name, last in contacts:
+            btn = ctk.CTkButton(self.dm_scroll, text=f"{name}\n{last}", height=50, fg_color="transparent", anchor="w", command=lambda x=cid: self.dm_load_thread(x))
+            btn.pack(fill="x", pady=2)
+
+    def dm_load_thread(self, contact_id):
+        self.dm_current_contact = contact_id
+        for w in self.dm_msgs_scroll.winfo_children(): w.destroy()
+        msgs = db.get_dm_messages(contact_id)
+        for role, content, is_draft in msgs:
+            align = "e" if role == "me" else "w"
+            color = HELIX_PURPLE if role == "me" else BG_CARD
+            lbl = ctk.CTkLabel(self.dm_msgs_scroll, text=content, fg_color=color, corner_radius=10, padx=10, pady=5, wraplength=400)
+            lbl.pack(anchor=align, pady=5, padx=10)
+
+    def dm_send(self):
+        txt = self.dm_input.get("0.0", "end").strip()
+        if not txt or not self.dm_current_contact: return
+        db.save_dm_message(self.dm_current_contact, "me", txt)
+        self.dm_input.delete("0.0", "end")
+        self.dm_load_thread(self.dm_current_contact)
+        # Simulate reply
+        self.after(1000, lambda: self.dm_receive_sim(self.dm_current_contact))
+
+    def dm_receive_sim(self, cid):
+        db.save_dm_message(cid, "them", "This is a simulated reply.")
+        if self.dm_current_contact == cid: self.dm_load_thread(cid)
+
+    def dm_toggle_draft(self):
+        self.dm_draft_visible = not self.dm_draft_visible
+        if self.dm_draft_visible:
+            self.dm_draft_panel.grid(row=0, column=2, sticky="nsew")
+            # Populate draft panel content
+            for w in self.dm_draft_panel.winfo_children(): w.destroy()
+            ctk.CTkLabel(self.dm_draft_panel, text="AI Draft Assist", font=FONT_BOLD).pack(pady=20)
+            self.draft_prompt = ctk.CTkTextbox(self.dm_draft_panel, height=80, fg_color=BG_INPUT)
+            self.draft_prompt.pack(padx=10, fill="x")
+            self.draft_prompt.insert("0.0", "Draft a reply that...")
+
+            ctk.CTkButton(self.dm_draft_panel, text="Generate", command=self.dm_run_draft).pack(pady=10)
+            self.draft_result = ctk.CTkTextbox(self.dm_draft_panel, height=200, fg_color=BG_INPUT)
+            self.draft_result.pack(padx=10, fill="both", expand=True)
+            ctk.CTkButton(self.dm_draft_panel, text="Use Draft", fg_color=HELIX_PURPLE, text_color="black", command=self.dm_use_draft).pack(pady=20)
+        else:
+            self.dm_draft_panel.grid_forget()
+
+    def dm_run_draft(self):
+        p = self.draft_prompt.get("0.0", "end")
+        # Stub AI gen
+        self.draft_result.insert("end", f"\n[Draft based on: {p.strip()}]\nHello! I wanted to check in...")
+
+    def dm_use_draft(self):
+        txt = self.draft_result.get("0.0", "end").strip()
+        self.dm_input.insert("end", txt)
+        self.dm_toggle_draft()
 
     def _setup_quickfix_page(self, tab: ctk.CTkFrame):
         tab.grid_rowconfigure(0, weight=1)
@@ -1211,7 +1522,7 @@ class HelixApp(ctk.CTk):
         if tab_name == self.active_tab: return
 
         # Decide direction
-        order = ["Talk to AI", "Canvas", "Quick Fix"]
+        order = ["Talk to AI", "Canvas", "Messages", "Quick Fix"]
         try:
             curr_idx = order.index(self.active_tab)
             new_idx = order.index(tab_name)
@@ -1564,6 +1875,28 @@ class HelixApp(ctk.CTk):
                 base += f"\nNotebook:\n{db.load_notebook_content(self.current_note_id)[1]}"
             except Exception:
                 pass
+
+        # RAG Implementation
+        if self.use_notebook_context:
+            try:
+                # Naive Retrieval: Fetch all notes and match keywords
+                # In production, use vector embeddings (e.g. chromadb)
+                notes = db.load_notebooks_list(self.current_user)
+                relevant_text = []
+                # prompt isn't passed here, but we can't easily get it without refactoring.
+                # Heuristic: Just dump recently modified notes if context is on.
+                # A better approach requires passing the prompt to this function.
+                # Let's limit to top 3 recent notes for context window safety.
+                for nid, title in notes[:3]:
+                    _, content = db.load_notebook_content(nid)
+                    if content.strip():
+                        relevant_text.append(f"--- Note: {title} ---\n{content[:500]}...") # Truncate
+
+                if relevant_text:
+                    base += "\n\n[Context from Notebooks]:\n" + "\n".join(relevant_text)
+            except Exception:
+                pass
+
         return base
 
     # ---------- CHAT SEND ----------
