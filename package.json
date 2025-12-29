@@ -1,0 +1,47 @@
+{
+  "name": "helix-electron",
+  "version": "2.0.0",
+  "description": "Helix AI Desktop App",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build-python": "pyinstaller --onefile --distpath backend_dist --name server backend/server.py",
+    "dist": "npm run build-python && electron-builder"
+  },
+  "author": "Jules",
+  "license": "MIT",
+  "build": {
+    "appId": "com.helix.app",
+    "productName": "Helix",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "helix_logo.png"
+    },
+    "files": [
+      "**/*",
+      "!backend",
+      "!backend_dist",
+      "!helix_v2.db",
+      "!helix_session.json",
+      "!.gitignore",
+      "!*.spec"
+    ],
+    "extraResources": [
+      {
+        "from": "backend_dist/server.exe",
+        "to": "backend/server.exe"
+      },
+      {
+        "from": "helix_v2.db",
+        "to": "helix_v2.db"
+      }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^29.1.0",
+    "electron-builder": "^24.13.3"
+  }
+}

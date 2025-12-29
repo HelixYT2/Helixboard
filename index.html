@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HELIX</title>
+    <link rel="stylesheet" href="styles.css">
+    <!-- Google Fonts for Google Sans lookalike (Open Sans or Roboto) -->
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- LOGIN OVERLAY -->
+    <div id="login-overlay" class="overlay">
+        <div class="card login-card">
+            <div class="logo-area">
+                <div class="logo-icon">🧬</div>
+                <h1>HELIX</h1>
+            </div>
+            <div class="input-group">
+                <input type="email" id="email" placeholder="Email">
+                <input type="password" id="password" placeholder="Password">
+            </div>
+            <button id="auth-btn" class="primary-btn">Log In</button>
+            <p id="toggle-auth" class="link">Don't have an account? Sign Up</p>
+        </div>
+    </div>
+
+    <!-- OTP OVERLAY -->
+    <div id="otp-overlay" class="overlay hidden">
+        <div class="card otp-card">
+            <h2>VERIFY</h2>
+            <input type="text" id="otp-code" placeholder="Code" maxlength="6">
+            <button id="otp-submit" class="primary-btn">Submit</button>
+            <button id="otp-back" class="secondary-btn">Back</button>
+        </div>
+    </div>
+
+    <!-- MAIN APP -->
+    <div id="app-container" class="hidden">
+
+        <!-- DRAFT MODE OVERLAY -->
+        <div id="draft-overlay" class="overlay hidden" style="background-color: rgba(0,0,0,0.8);">
+            <div class="draft-layout">
+                <!-- Left: Instructions -->
+                <div class="draft-left">
+                    <h3>INSTRUCTIONS</h3>
+                    <div id="draft-history"></div>
+                    <div class="draft-input-pill">
+                        <textarea id="draft-input" placeholder="Describe what to write..."></textarea>
+                        <button id="draft-run-btn" class="send-btn">➤</button>
+                    </div>
+                </div>
+                <!-- Right: Preview -->
+                <div class="draft-right">
+                    <div class="draft-header">
+                        <h3>DRAFT PREVIEW</h3>
+                        <div class="draft-actions">
+                            <button id="draft-cancel" class="secondary-btn">Cancel</button>
+                            <button id="draft-insert" class="primary-btn" style="width: auto; padding: 0 20px;">Insert into Notebook</button>
+                        </div>
+                    </div>
+                    <textarea id="draft-preview"></textarea>
+                </div>
+            </div>
+        </div>
+
+        <!-- SIDEBAR -->
+        <div id="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-icon-small">🧬</div>
+                <h2>HELIX</h2>
+            </div>
+            <div class="sidebar-actions">
+                <button id="new-chat-btn">+ Chat</button>
+                <button id="new-notebook-btn">+ Canvas</button>
+            </div>
+            <div id="library-scroll">
+                <!-- Chat History / Notebooks List -->
+                <div class="section-title">CHATS</div>
+                <div id="chat-list"></div>
+                <div class="section-title">CANVASES</div>
+                <div id="notebook-list"></div>
+            </div>
+            <div class="sidebar-footer">
+                <button id="settings-btn">⚙️ Settings</button>
+            </div>
+        </div>
+
+        <!-- MAIN CONTENT -->
+        <div id="main-content">
+            <!-- PAGES -->
+
+            <!-- TALK TO AI -->
+            <div id="page-talk" class="page active">
+                <div id="welcome-screen">
+                    <div class="logo-icon-large">🧬</div>
+                    <h1>How can I help?</h1>
+                    <div class="suggestions">
+                        <div class="sugg-card" data-prompt="Draft an email to my boss about a raise">Draft an email<br><span>to my boss about a raise</span></div>
+                        <div class="sugg-card" data-prompt="Debug code in my python script">Debug code<br><span>in my python script</span></div>
+                        <div class="sugg-card" data-prompt="Plan a trip to Kyoto in the spring">Plan a trip<br><span>to Kyoto in the spring</span></div>
+                        <div class="sugg-card" data-prompt="Brainstorm marketing ideas for a coffee shop">Brainstorm<br><span>marketing ideas for a coffee shop</span></div>
+                    </div>
+                </div>
+
+                <div id="chat-container" class="hidden">
+                    <div id="chat-messages">
+                        <!-- Bubbles go here -->
+                    </div>
+                </div>
+
+                <div class="input-island">
+                    <div class="input-pill">
+                        <textarea id="chat-input" placeholder="Ask Helix anything..."></textarea>
+                        <div class="tools-row">
+                            <button id="attach-btn" class="icon-btn">+</button>
+                            <select id="model-select">
+                                <option value="Standard">Standard</option>
+                                <option value="Thinking">Thinking</option>
+                            </select>
+                            <button id="send-btn" class="send-btn">➤</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CANVAS -->
+            <div id="page-canvas" class="page">
+                <!-- Dashboard View -->
+                <div id="canvas-dashboard">
+                    <div class="dashboard-header">
+                        <h1>Canvas</h1>
+                        <button id="create-notebook-btn" class="primary-btn">+ New Notebook</button>
+                    </div>
+                    <div id="canvas-grid">
+                        <!-- Cards -->
+                    </div>
+                </div>
+
+                <!-- Editor View -->
+                <div id="canvas-editor" class="hidden">
+                    <div class="editor-toolbar">
+                        <button id="canvas-back" class="secondary-btn">← Home</button>
+                        <input type="text" id="note-title" placeholder="Untitled Canvas">
+                        <div class="actions">
+                            <button id="canvas-save" class="secondary-btn">Save</button>
+                            <button id="canvas-draft-mode" class="secondary-btn">Draft Mode</button>
+                        </div>
+                    </div>
+                    <div class="editor-frame">
+                        <textarea id="note-content"></textarea>
+                        <div class="ai-bar">
+                            <input type="text" id="note-ai-input" placeholder="Quick edit...">
+                            <button id="note-ai-run" class="primary-btn">Run</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- MESSAGES -->
+            <div id="page-messages" class="page">
+                <div class="dm-layout">
+                    <div class="dm-sidebar">
+                        <div class="dm-header">
+                            <div class="avatar-circle">ME</div>
+                            <button id="add-friend-btn" class="icon-btn">+</button>
+                        </div>
+                        <h3>Messages</h3>
+                        <div id="dm-list-scroll">
+                            <!-- DM Threads -->
+                        </div>
+                    </div>
+                    <div class="dm-chat">
+                        <div id="dm-messages-scroll"></div>
+                        <div class="dm-input-area">
+                            <textarea id="dm-input" placeholder="Message..."></textarea>
+                            <div class="dm-actions">
+                                <button class="secondary-btn">Draft with AI ✨</button>
+                                <button id="dm-send-btn" class="primary-btn">Send</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- QUICK FIX -->
+            <div id="page-quickfix" class="page">
+                <div class="q-container">
+                    <textarea id="q-result" placeholder="Output will appear here..."></textarea>
+                    <div class="q-bar">
+                        <input type="text" id="q-input" placeholder="Custom instruction...">
+                        <button id="q-refine-btn" class="primary-btn">Refine</button>
+                    </div>
+                </div>
+            </div>
+
+        </div> <!-- End Main Content -->
+
+        <!-- BOTTOM NAV -->
+        <div id="bottom-nav">
+            <button class="nav-btn active" data-tab="page-talk">Talk to AI</button>
+            <button class="nav-btn" data-tab="page-canvas">Canvas</button>
+            <button class="nav-btn" data-tab="page-messages">Messages</button>
+            <button class="nav-btn" data-tab="page-quickfix">Quick Fix</button>
+        </div>
+
+    </div>
+
+    <script src="renderer.js"></script>
+</body>
+</html>

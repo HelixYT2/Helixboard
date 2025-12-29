@@ -636,9 +636,18 @@ class CanvasDraftingOverlay(ctk.CTkFrame):
             {"role": "user", "content": f"Current Text:\n{current}\n\nInstruction: {inst}"}
         ]
 
+        # Hide input while generating
+        self.inp_pill.pack_forget()
+
+        def on_complete():
+            self.inp_pill.pack(fill="x")
+
+        def run_wrapper():
+            self.app.run_ai_stream(msgs, self.preview_box, False)
+            self.after(0, on_complete)
+
         threading.Thread(
-            target=self.app.run_ai_stream,
-            args=(msgs, self.preview_box, False),
+            target=run_wrapper,
             daemon=True
         ).start()
 
@@ -1041,6 +1050,7 @@ class HelixApp(ctk.CTk):
         self.use_notebook_context = False # Global context toggle
 
         self.active_tab = "Talk to AI"
+        self.is_animating = False
 
         self.pending_email = ""
         self.pending_pass = ""
@@ -1108,6 +1118,7 @@ class HelixApp(ctk.CTk):
 
     # ---------- ANIMATION HELPER ----------
     def animate_slide_page(self, old_frame, new_frame, direction="right"):
+        self.is_animating = True
         # We need to use place for sliding
         # Assume both frames are children of self.pages_container
 
@@ -1130,6 +1141,7 @@ class HelixApp(ctk.CTk):
             if i > steps:
                 new_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
                 old_frame.place_forget() # Hide old
+                self.is_animating = False
                 return
 
             # Linear interpolation
@@ -1637,17 +1649,21 @@ class HelixApp(ctk.CTk):
 
         # Re-add Avatar
         if self.current_user:
-            _, _, _, my_av_path = db.get_profile(self.current_user)
-            if my_av_path and os.path.exists(my_av_path):
-                 try:
-                     pil_img = Image.open(my_av_path)
-                     av_img = ctk.CTkImage(light_image=make_circle(pil_img), size=(40, 40))
-                     lbl = ctk.CTkLabel(self.dm_header, text="", image=av_img)
-                     lbl.pack(side="left")
-                 except:
+            try:
+                _, _, _, my_av_path = db.get_profile(self.current_user)
+                if my_av_path and os.path.exists(my_av_path):
+                     try:
+                         pil_img = Image.open(my_av_path)
+                         # Deferred loading/error check
+                         av_img = ctk.CTkImage(light_image=make_circle(pil_img), size=(40, 40))
+                         lbl = ctk.CTkLabel(self.dm_header, text="", image=av_img)
+                         lbl.pack(side="left")
+                     except Exception:
+                         self.draw_fallback_avatar(self.dm_header)
+                else:
                      self.draw_fallback_avatar(self.dm_header)
-            else:
-                 self.draw_fallback_avatar(self.dm_header)
+            except Exception:
+                self.draw_fallback_avatar(self.dm_header)
         else:
             self.draw_fallback_avatar(self.dm_header)
 
@@ -1864,6 +1880,7 @@ class HelixApp(ctk.CTk):
 
     def switch_tab(self, tab_name: str):
         if tab_name == self.active_tab: return
+        if self.is_animating: return
 
         # Decide direction
         order = ["Talk to AI", "Canvas", "Messages", "Quick Fix"]
@@ -1888,6 +1905,9 @@ class HelixApp(ctk.CTk):
 
         for name, btn in self.nav_buttons.items():
             btn.configure(fg_color=BG_INPUT if name == tab_name else "transparent")
+
+        # Ensure bottom nav stays on top
+        self.bottom_nav.lift()
 
     # ---------- SETTINGS ----------
     def open_settings(self):
