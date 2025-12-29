@@ -206,7 +206,8 @@ class DatabaseManager:
                 email TEXT PRIMARY KEY,
                 display_name TEXT,
                 bio TEXT,
-                avatar_color TEXT
+                avatar_color TEXT,
+                avatar_path TEXT
             )
         """)
         # DM Tables
@@ -364,20 +365,26 @@ class DatabaseManager:
 
     def get_profile(self, email: str):
         conn = sqlite3.connect(self.path)
-        res = conn.cursor().execute("SELECT display_name, bio, avatar_color FROM profiles WHERE email=?", (email,)).fetchone()
+        # Try to get avatar_path (might not exist in old rows, so handle gracefully)
+        try:
+             res = conn.cursor().execute("SELECT display_name, bio, avatar_color, avatar_path FROM profiles WHERE email=?", (email,)).fetchone()
+        except:
+             res = conn.cursor().execute("SELECT display_name, bio, avatar_color FROM profiles WHERE email=?", (email,)).fetchone()
+             if res: res = res + (None,)
+
         conn.close()
         if not res:
-            return (email.split("@")[0], "New Helix User", "#8AB4F8")
+            return (email.split("@")[0], "New Helix User", "#8AB4F8", None)
         return res
 
-    def save_profile(self, email: str, display_name: str, bio: str):
+    def save_profile(self, email: str, display_name: str, bio: str, avatar_path: str = None):
         conn = sqlite3.connect(self.path)
         # Check if exists
         exists = conn.cursor().execute("SELECT 1 FROM profiles WHERE email=?", (email,)).fetchone()
         if exists:
-            conn.cursor().execute("UPDATE profiles SET display_name=?, bio=? WHERE email=?", (display_name, bio, email))
+            conn.cursor().execute("UPDATE profiles SET display_name=?, bio=?, avatar_path=? WHERE email=?", (display_name, bio, avatar_path, email))
         else:
-            conn.cursor().execute("INSERT INTO profiles VALUES (?, ?, ?, ?)", (email, display_name, bio, "#8AB4F8"))
+            conn.cursor().execute("INSERT INTO profiles VALUES (?, ?, ?, ?, ?)", (email, display_name, bio, "#8AB4F8", avatar_path))
         conn.commit()
         conn.close()
 
@@ -580,15 +587,18 @@ class CanvasDraftingOverlay(ctk.CTkFrame):
         self.chat_scroll = ctk.CTkScrollableFrame(left_pane, fg_color="transparent")
         self.chat_scroll.pack(fill="both", expand=True, padx=10)
 
-        # Instruction Input
-        inp_frame = ctk.CTkFrame(left_pane, fg_color=BG_INPUT, height=100)
-        inp_frame.pack(fill="x", side="bottom", padx=15, pady=20)
+        # Instruction Input (Message Box Style)
+        inp_container = ctk.CTkFrame(left_pane, fg_color="transparent")
+        inp_container.pack(fill="x", side="bottom", padx=15, pady=20)
 
-        self.inp_box = ctk.CTkTextbox(inp_frame, height=60, fg_color="transparent")
-        self.inp_box.pack(fill="x", pady=10, padx=10)
-        self.inp_box.insert("0.0", "Describe what you want to write...")
+        self.inp_pill = ctk.CTkFrame(inp_container, fg_color=BG_INPUT, height=60, corner_radius=30)
+        self.inp_pill.pack(fill="x")
 
-        ctk.CTkButton(inp_frame, text="Update Draft", fg_color=HELIX_PURPLE, text_color="black", command=self.run_draft).pack(fill="x", pady=(0, 10), padx=10)
+        self.inp_box = ctk.CTkTextbox(self.inp_pill, height=40, fg_color="transparent", font=FONT_INPUT, wrap="word")
+        self.inp_box.pack(side="left", fill="x", expand=True, padx=15, pady=10)
+        self.app.setup_textbox_placeholder(self.inp_box, "Describe what to write...", self.run_draft)
+
+        ctk.CTkButton(self.inp_pill, text="➤", width=40, height=40, corner_radius=20, fg_color=HELIX_PURPLE, text_color="black", font=("Arial", 16), command=self.run_draft).pack(side="right", padx=10)
 
         # RIGHT PANE: Final Output
         right_pane = ctk.CTkFrame(self, fg_color=BG_DARK, corner_radius=0)
@@ -607,15 +617,30 @@ class CanvasDraftingOverlay(ctk.CTkFrame):
 
     def run_draft(self):
         inst = self.inp_box.get("0.0", "end").strip()
+        if not inst or getattr(self.inp_box, "has_placeholder", False):
+            return
+
         current = self.preview_box.get("0.0", "end").strip()
 
-        # Add user msg to left
-        lbl = ctk.CTkLabel(self.chat_scroll, text=inst, fg_color=BG_CARD, corner_radius=10, padx=10, pady=5, anchor="w", justify="left")
-        lbl.pack(fill="x", pady=5)
+        # Clear Input
+        self.inp_box.delete("0.0", "end")
+        self.app.setup_textbox_placeholder(self.inp_box, "Describe what to write...", self.run_draft)
 
-        # Stub AI generation
-        # Real impl would stream here
-        self.preview_box.insert("end", "\n\n[AI would update draft here based on instruction...]")
+        # Add user msg to left (History)
+        lbl = ctk.CTkLabel(self.chat_scroll, text=inst, fg_color=BG_CARD, corner_radius=10, padx=10, pady=5, anchor="w", justify="left", wraplength=200)
+        lbl.pack(fill="x", pady=5, padx=5)
+
+        # Run AI Stream
+        msgs = [
+            {"role": "system", "content": "You are an AI writing assistant. Output ONLY the updated text based on the user's instruction. Do not converse. Do not add introductions."},
+            {"role": "user", "content": f"Current Text:\n{current}\n\nInstruction: {inst}"}
+        ]
+
+        threading.Thread(
+            target=self.app.run_ai_stream,
+            args=(msgs, self.preview_box, False),
+            daemon=True
+        ).start()
 
     def insert_and_close(self):
         final_text = self.preview_box.get("0.0", "end").strip()
@@ -743,9 +768,19 @@ class SettingsOverlay(ctk.CTkFrame):
 
     def build_profile_page(self):
         # Fetch data
-        dname, bio, color = self.db.get_profile(self.current_user)
+        dname, bio, color, av_path = self.db.get_profile(self.current_user)
+        self.new_avatar_path = av_path # store for saving
 
         ctk.CTkLabel(self.content, text="Public Profile (Saved Locally)", font=FONT_NORMAL, text_color=TEXT_GRAY).pack(anchor="w", pady=(0, 20))
+
+        # Avatar
+        av_row = ctk.CTkFrame(self.content, fg_color="transparent")
+        av_row.pack(anchor="w", pady=10)
+
+        self.lbl_avatar_status = ctk.CTkLabel(av_row, text="Avatar: Default" if not av_path else "Avatar: Custom", font=FONT_SMALL, text_color="gray")
+        self.lbl_avatar_status.pack(side="left", padx=(0, 10))
+
+        ctk.CTkButton(av_row, text="Change Avatar", width=120, height=30, fg_color=BG_CARD, command=self.pick_avatar).pack(side="left")
 
         # Display Name
         ctk.CTkLabel(self.content, text="Display Name", font=FONT_BOLD).pack(anchor="w", pady=(10, 5))
@@ -762,11 +797,31 @@ class SettingsOverlay(ctk.CTkFrame):
         # Save
         ctk.CTkButton(self.content, text="Save Changes", fg_color=HELIX_PURPLE, text_color="black", width=150, height=40, corner_radius=20, command=self.save_profile).pack(anchor="w", pady=30)
 
+    def pick_avatar(self):
+        path = tk.filedialog.askopenfilename(filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.webp")])
+        if path:
+             # Save to user_data/avatars
+             # Ensure dir
+             base_dir = data_path("user_data/avatars")
+             os.makedirs(base_dir, exist_ok=True)
+
+             ext = os.path.splitext(path)[1]
+             new_name = f"{uuid.uuid4()}{ext}"
+             dest = os.path.join(base_dir, new_name)
+
+             try:
+                 import shutil
+                 shutil.copy(path, dest)
+                 self.new_avatar_path = dest
+                 self.lbl_avatar_status.configure(text="Avatar: Selected (Click Save)")
+             except Exception as e:
+                 messagebox.showerror("Error", f"Failed to load image: {e}")
+
     def save_profile(self):
         dn = self.entry_dname.get().strip()
         bio = self.entry_bio.get("0.0", "end").strip()
-        self.db.save_profile(self.current_user, dn, bio)
-        messagebox.showinfo("Success", "Profile updated!")
+        self.db.save_profile(self.current_user, dn, bio, self.new_avatar_path)
+        messagebox.showinfo("Success", "Profile updated! Restart to see changes.")
 
     def build_context_page(self):
         ctk.CTkLabel(self.content, text="Notebook Context (RAG)", font=FONT_SUBHEADER).pack(anchor="w", pady=(10, 10))
@@ -1265,7 +1320,8 @@ class HelixApp(ctk.CTk):
 
         # Bottom nav pill
         self.nav_buttons: dict[str, ctk.CTkButton] = {}
-        self.bottom_nav = ctk.CTkFrame(self.main_area, fg_color=BG_CARD, corner_radius=22, height=44)
+        # Make background distinct or darker to avoid visual overlap artifacts
+        self.bottom_nav = ctk.CTkFrame(self.main_area, fg_color="#181818", corner_radius=22, height=44)
         self.bottom_nav.place(relx=0.5, rely=1.0, anchor="s", y=-14)
 
         def make_nav_btn(name: str, w: int = 105):
@@ -1273,7 +1329,7 @@ class HelixApp(ctk.CTk):
                 self.bottom_nav,
                 text=name,
                 fg_color="transparent",
-                hover_color=BG_INPUT,
+                hover_color="#333333", # Darker hover to prevent "box" look
                 text_color=TEXT_WHITE,
                 width=w,
                 height=34,
@@ -1540,13 +1596,19 @@ class HelixApp(ctk.CTk):
         dm_header = ctk.CTkFrame(self.dm_list, fg_color="transparent", height=60)
         dm_header.pack(fill="x", padx=15, pady=20)
 
-        # Current User Avatar (Simple Circle)
-        # In a real app, this would be the user's actual avatar.
-        # We'll use a colored circle with initials.
-        avatar_canvas = ctk.CTkCanvas(dm_header, width=40, height=40, bg=BG_SIDEBAR, highlightthickness=0)
-        avatar_canvas.pack(side="left")
-        avatar_canvas.create_oval(2, 2, 38, 38, fill=HELIX_PURPLE, outline="")
-        avatar_canvas.create_text(20, 20, text="ME", fill="black", font=("Arial", 10, "bold"))
+        # Current User Avatar
+        # Check DB for avatar path
+        _, _, _, my_av_path = db.get_profile(self.current_user)
+
+        if my_av_path and os.path.exists(my_av_path):
+             try:
+                 pil_img = Image.open(my_av_path)
+                 av_img = ctk.CTkImage(light_image=make_circle(pil_img), size=(40, 40))
+                 ctk.CTkLabel(dm_header, text="", image=av_img).pack(side="left")
+             except:
+                 self.draw_fallback_avatar(dm_header)
+        else:
+             self.draw_fallback_avatar(dm_header)
 
         # Add Friend Button
         ctk.CTkButton(
@@ -1561,6 +1623,12 @@ class HelixApp(ctk.CTk):
             font=("Arial", 20),
             command=self.dm_add_friend_dialog
         ).pack(side="right")
+
+    def draw_fallback_avatar(self, parent):
+        avatar_canvas = ctk.CTkCanvas(parent, width=40, height=40, bg=BG_SIDEBAR, highlightthickness=0)
+        avatar_canvas.pack(side="left")
+        avatar_canvas.create_oval(2, 2, 38, 38, fill=HELIX_PURPLE, outline="")
+        avatar_canvas.create_text(20, 20, text="ME", fill="black", font=("Arial", 10, "bold"))
 
         ctk.CTkLabel(self.dm_list, text="Messages", font=FONT_BOLD, text_color=TEXT_GRAY).pack(anchor="w", padx=20, pady=(10, 5))
 
@@ -1871,14 +1939,22 @@ class HelixApp(ctk.CTk):
         self.pending_otp = str(random.randint(100000, 999999))
 
         def send():
-            send_otp_email(self.pending_email, self.pending_otp)
+            try:
+                # In production, this should handle network errors robustly
+                # If smtp fails, we might just print code to console for debugging
+                success, msg = send_otp_email(self.pending_email, self.pending_otp)
+                if not success:
+                    print(f"DEBUG: Email failed. Code is {self.pending_otp}")
+            except Exception as e:
+                print(f"DEBUG: Email crash. Code is {self.pending_otp}. Error: {e}")
 
         threading.Thread(target=send, daemon=True).start()
         self.entry_otp.delete(0, "end")
         self.show_otp()
 
     def verify_otp(self):
-        if self.entry_otp.get().strip() != self.pending_otp:
+        code = self.entry_otp.get().strip()
+        if not code or code != self.pending_otp:
             messagebox.showerror("Error", "Invalid code.")
             return
 
