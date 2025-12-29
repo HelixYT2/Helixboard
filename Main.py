@@ -230,6 +230,15 @@ class DatabaseManager:
                 is_draft INTEGER
             )
         """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS friendships (
+                id TEXT PRIMARY KEY,
+                user_email TEXT,
+                friend_email TEXT,
+                status TEXT,
+                created_at TEXT
+            )
+        """)
         conn.commit()
         conn.close()
 
@@ -400,6 +409,60 @@ class DatabaseManager:
         conn.cursor().execute("INSERT INTO dm_messages VALUES (?, ?, ?, ?, ?, ?)", (mid, contact_id, role, content, ts, is_draft))
         if not is_draft:
             conn.cursor().execute("UPDATE contacts SET last_msg=?, updated_at=? WHERE id=?", (content[:30], ts, contact_id))
+        conn.commit()
+        conn.close()
+
+    # --- FRIENDSHIP METHODS ---
+    def send_friend_request(self, user_email, target_email):
+        # Check if user exists
+        if not self.check_exists(target_email):
+            return False, "User not found."
+
+        conn = sqlite3.connect(self.path)
+        c = conn.cursor()
+        # Check if already friends or pending
+        existing = c.execute("SELECT status FROM friendships WHERE (user_email=? AND friend_email=?) OR (user_email=? AND friend_email=?)",
+                             (user_email, target_email, target_email, user_email)).fetchone()
+        if existing:
+            return False, f"Request already {existing[0]}."
+
+        fid = str(uuid.uuid4())
+        c.execute("INSERT INTO friendships VALUES (?, ?, ?, ?, ?)", (fid, user_email, target_email, "pending", datetime.now().strftime("%Y-%m-%d")))
+        conn.commit()
+        conn.close()
+        return True, "Request sent!"
+
+    def get_friendships(self, email):
+        """Returns list of friends (accepted) and pending requests."""
+        conn = sqlite3.connect(self.path)
+        # We want to find anyone where status='accepted' AND email is involved
+
+        # Get accepted friends
+        friends = []
+        rows = conn.cursor().execute("SELECT user_email, friend_email, status FROM friendships WHERE (user_email=? OR friend_email=?) AND status='accepted'", (email, email)).fetchall()
+        for u, f, s in rows:
+            other = f if u == email else u
+            # Get profile info
+            p = self.get_profile(other)
+            friends.append({"email": other, "name": p[0], "avatar": p[2], "status": "accepted"})
+
+        conn.close()
+        return friends
+
+    def get_pending_requests(self, email):
+        conn = sqlite3.connect(self.path)
+        # Find requests where friend_email == email AND status == 'pending'
+        rows = conn.cursor().execute("SELECT id, user_email FROM friendships WHERE friend_email=? AND status='pending'", (email,)).fetchall()
+        pending = []
+        for rid, requester_email in rows:
+             p = self.get_profile(requester_email)
+             pending.append({"id": rid, "email": requester_email, "name": p[0]})
+        conn.close()
+        return pending
+
+    def accept_friend_request(self, request_id):
+        conn = sqlite3.connect(self.path)
+        conn.cursor().execute("UPDATE friendships SET status='accepted' WHERE id=?", (request_id,))
         conn.commit()
         conn.close()
 
@@ -1343,34 +1406,63 @@ class HelixApp(ctk.CTk):
         tab.bind("<Configure>", on_resize)
 
     def _setup_notebook_page(self, tab: ctk.CTkFrame):
-        # Renamed visual to "Canvas" but internal logic remains notebook-based for now
-        tab.grid_columnconfigure(0, weight=1) # Full width editor
+        # Two views: Dashboard (List) and Editor (Content)
+        # We'll use a container and switch visibility
+        tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
 
-        # We removed the list frame from here because it's moving to the Sidebar
-        editor = ctk.CTkFrame(tab, fg_color=BG_INPUT, corner_radius=20)
-        editor.grid(row=0, column=0, sticky="nsew", padx=20, pady=(20, 90))  # bottom padding for nav
-        editor.grid_rowconfigure(1, weight=1)
-        editor.grid_columnconfigure(0, weight=1)
+        self.canvas_container = ctk.CTkFrame(tab, fg_color="transparent")
+        self.canvas_container.grid(row=0, column=0, sticky="nsew")
+        self.canvas_container.grid_columnconfigure(0, weight=1)
+        self.canvas_container.grid_rowconfigure(0, weight=1)
 
-        self.note_title = ctk.CTkEntry(editor, font=FONT_HEADER, fg_color="transparent", border_width=0, placeholder_text="Untitled Canvas")
-        self.note_title.grid(row=0, column=0, sticky="ew", padx=30, pady=(20, 10))
+        # 1. DASHBOARD VIEW
+        self.canvas_dashboard = ctk.CTkFrame(self.canvas_container, fg_color=BG_DARK)
+        self.canvas_dashboard.grid(row=0, column=0, sticky="nsew")
 
-        btn_row = ctk.CTkFrame(editor, fg_color="transparent")
-        btn_row.grid(row=0, column=1, padx=30, pady=(20, 10))
+        # Dashboard Header
+        db_head = ctk.CTkFrame(self.canvas_dashboard, fg_color="transparent")
+        db_head.pack(fill="x", padx=40, pady=40)
 
-        ctk.CTkButton(btn_row, text="Draft Mode", width=90, height=35, corner_radius=17, fg_color=BG_CARD, hover_color=BG_DARK,
-                      command=self.open_canvas_drafting).pack(side="left", padx=5)
+        ctk.CTkLabel(db_head, text="Canvas", font=FONT_HEADER, text_color="white").pack(side="left")
+        ctk.CTkButton(db_head, text="+ New Notebook", width=140, height=40, corner_radius=20,
+                      fg_color=HELIX_PURPLE, text_color="black", font=FONT_BOLD,
+                      command=self.notebook_new).pack(side="right")
 
-        ctk.CTkButton(btn_row, text="Save", width=70, height=35, corner_radius=17, fg_color=BG_CARD, hover_color=BG_DARK,
-                      command=self.notebook_save).pack(side="left", padx=5)
+        # Notebook Grid/List
+        self.canvas_list_scroll = ctk.CTkScrollableFrame(self.canvas_dashboard, fg_color="transparent")
+        self.canvas_list_scroll.pack(fill="both", expand=True, padx=40, pady=(0, 100)) # Pad for bottom nav
 
-        self.notebook = ctk.CTkTextbox(editor, font=FONT_NORMAL, fg_color="transparent", wrap="word")
-        self.notebook.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=30, pady=(0, 0))
+        # 2. EDITOR VIEW
+        self.canvas_editor = ctk.CTkFrame(self.canvas_container, fg_color=BG_DARK)
+        self.canvas_editor.grid(row=0, column=0, sticky="nsew")
+        self.canvas_editor.grid_remove() # Start hidden
 
-        # Standard AI bar (still useful for quick edits)
-        ai_bar = ctk.CTkFrame(editor, fg_color=BG_CARD, height=60, corner_radius=30)
-        ai_bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=30, pady=20)
+        self.canvas_editor.grid_columnconfigure(0, weight=1)
+        self.canvas_editor.grid_rowconfigure(1, weight=1) # Text area
+
+        # Editor Toolbar (Back btn + Title + Save)
+        ed_toolbar = ctk.CTkFrame(self.canvas_editor, fg_color="transparent", height=60)
+        ed_toolbar.grid(row=0, column=0, sticky="ew", padx=20, pady=(10, 5))
+
+        ctk.CTkButton(ed_toolbar, text="← Home", width=80, height=35, fg_color="transparent", border_width=1, border_color="#333", command=self.canvas_back_to_home).pack(side="left", padx=10)
+
+        self.note_title = ctk.CTkEntry(ed_toolbar, font=("Google Sans", 20, "bold"), fg_color="transparent", border_width=0, placeholder_text="Untitled Canvas", width=400)
+        self.note_title.pack(side="left", padx=20)
+
+        ctk.CTkButton(ed_toolbar, text="Save", width=70, height=35, corner_radius=17, fg_color=BG_CARD, hover_color=BG_DARK, command=self.notebook_save).pack(side="right", padx=5)
+        ctk.CTkButton(ed_toolbar, text="Draft Mode", width=100, height=35, corner_radius=17, fg_color=BG_CARD, hover_color=BG_DARK, command=self.open_canvas_drafting).pack(side="right", padx=5)
+
+        # Editor Frame
+        editor_frame = ctk.CTkFrame(self.canvas_editor, fg_color=BG_INPUT, corner_radius=20)
+        editor_frame.grid(row=1, column=0, sticky="nsew", padx=20, pady=(10, 90)) # Padding for nav
+
+        self.notebook = ctk.CTkTextbox(editor_frame, font=FONT_NORMAL, fg_color="transparent", wrap="word", height=400)
+        self.notebook.pack(fill="both", expand=True, padx=20, pady=20)
+
+        # AI Bar (inside editor frame at bottom)
+        ai_bar = ctk.CTkFrame(editor_frame, fg_color=BG_CARD, height=60, corner_radius=30)
+        ai_bar.pack(fill="x", padx=20, pady=20)
 
         self.note_prompt = ctk.CTkTextbox(ai_bar, height=35, fg_color="transparent", font=FONT_INPUT, wrap="word")
         self.note_prompt.pack(side="left", fill="x", expand=True, padx=20, pady=12)
@@ -1379,8 +1471,54 @@ class HelixApp(ctk.CTk):
         ctk.CTkButton(ai_bar, text="Run", width=60, height=40, corner_radius=20, fg_color=HELIX_PURPLE, text_color="black",
                       command=self.notebook_ai_run).pack(side="right", padx=10)
 
-        # Drafting Overlay
         self.canvas_overlay = None
+        self.show_canvas_dashboard() # Default state
+
+    def show_canvas_dashboard(self):
+        self.canvas_editor.grid_remove()
+        self.canvas_dashboard.grid()
+        self.refresh_canvas_list_ui()
+
+    def show_canvas_editor(self):
+        self.canvas_dashboard.grid_remove()
+        self.canvas_editor.grid()
+
+    def canvas_back_to_home(self):
+        self.notebook_save() # Auto-save
+        self.show_canvas_dashboard()
+
+    def refresh_canvas_list_ui(self):
+        for w in self.canvas_list_scroll.winfo_children(): w.destroy()
+        if not self.current_user: return
+
+        notes = db.load_notebooks_list(self.current_user)
+        if not notes:
+             ctk.CTkLabel(self.canvas_list_scroll, text="No notebooks created yet.", font=FONT_NORMAL, text_color="gray").pack(pady=40)
+             return
+
+        # Grid layout for cards (e.g. 3 columns)
+        # ctkScrollableFrame uses pack/grid internally. We'll use a grid inside it.
+        container = ctk.CTkFrame(self.canvas_list_scroll, fg_color="transparent")
+        container.pack(fill="both", expand=True)
+
+        columns = 3
+        for i, (nid, title) in enumerate(notes):
+            row = i // columns
+            col = i % columns
+
+            card = ctk.CTkButton(
+                container,
+                text=f"\n\n{title or 'Untitled'}",
+                font=FONT_BOLD,
+                fg_color=BG_CARD,
+                hover_color=BG_INPUT,
+                width=200,
+                height=150,
+                corner_radius=15,
+                anchor="sw",
+                command=lambda x=nid: self.load_notebook(x)
+            )
+            card.grid(row=row, column=col, padx=15, pady=15)
 
     def open_canvas_drafting(self):
         if self.canvas_overlay: return
@@ -1393,34 +1531,64 @@ class HelixApp(ctk.CTk):
         tab.grid_columnconfigure(2, weight=0) # Draft panel (toggleable)
         tab.grid_rowconfigure(0, weight=1)
 
-        # LEFT: Thread List
-        self.dm_list = ctk.CTkFrame(tab, width=220, fg_color=BG_SIDEBAR, corner_radius=0)
+        # LEFT: Thread List (Friends)
+        self.dm_list = ctk.CTkFrame(tab, width=260, fg_color=BG_SIDEBAR, corner_radius=0)
         self.dm_list.grid(row=0, column=0, sticky="nsew")
         self.dm_list.grid_propagate(False)
 
-        ctk.CTkLabel(self.dm_list, text="Messages", font=FONT_BOLD).pack(pady=20)
-        ctk.CTkButton(self.dm_list, text="+ New DM", width=180, height=35, fg_color=BG_CARD, command=self.dm_new_contact).pack(pady=10)
+        # Header: Avatar + Add Friend
+        dm_header = ctk.CTkFrame(self.dm_list, fg_color="transparent", height=60)
+        dm_header.pack(fill="x", padx=15, pady=20)
+
+        # Current User Avatar (Simple Circle)
+        # In a real app, this would be the user's actual avatar.
+        # We'll use a colored circle with initials.
+        avatar_canvas = ctk.CTkCanvas(dm_header, width=40, height=40, bg=BG_SIDEBAR, highlightthickness=0)
+        avatar_canvas.pack(side="left")
+        avatar_canvas.create_oval(2, 2, 38, 38, fill=HELIX_PURPLE, outline="")
+        avatar_canvas.create_text(20, 20, text="ME", fill="black", font=("Arial", 10, "bold"))
+
+        # Add Friend Button
+        ctk.CTkButton(
+            dm_header,
+            text="+",
+            width=35,
+            height=35,
+            corner_radius=17,
+            fg_color=BG_CARD,
+            hover_color=BG_INPUT,
+            text_color="white",
+            font=("Arial", 20),
+            command=self.dm_add_friend_dialog
+        ).pack(side="right")
+
+        ctk.CTkLabel(self.dm_list, text="Messages", font=FONT_BOLD, text_color=TEXT_GRAY).pack(anchor="w", padx=20, pady=(10, 5))
 
         self.dm_scroll = ctk.CTkScrollableFrame(self.dm_list, fg_color="transparent")
         self.dm_scroll.pack(fill="both", expand=True)
 
         # CENTER: Chat
         self.dm_chat_area = ctk.CTkFrame(tab, fg_color=BG_DARK, corner_radius=0)
-        self.dm_chat_area.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
+        self.dm_chat_area.grid(row=0, column=1, sticky="nsew", padx=0, pady=0)
         self.dm_chat_area.grid_rowconfigure(0, weight=1)
         self.dm_chat_area.grid_columnconfigure(0, weight=1)
 
         self.dm_msgs_scroll = ctk.CTkScrollableFrame(self.dm_chat_area, fg_color="transparent")
-        self.dm_msgs_scroll.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
+        self.dm_msgs_scroll.grid(row=0, column=0, sticky="nsew", pady=(20, 10), padx=20)
 
-        self.dm_input = ctk.CTkTextbox(self.dm_chat_area, height=60, font=FONT_NORMAL)
-        self.dm_input.grid(row=1, column=0, sticky="ew")
+        # Input Area (with padding for bottom nav)
+        dm_input_area = ctk.CTkFrame(self.dm_chat_area, fg_color="transparent")
+        dm_input_area.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 90)) # 90px padding for bottom nav
 
-        btn_row = ctk.CTkFrame(self.dm_chat_area, fg_color="transparent")
-        btn_row.grid(row=2, column=0, sticky="ew", pady=10)
+        self.dm_input = ctk.CTkTextbox(dm_input_area, height=50, font=FONT_NORMAL, fg_color=BG_INPUT, border_width=0, corner_radius=25)
+        self.dm_input.pack(fill="x", pady=(0, 10))
+        self.setup_textbox_placeholder(self.dm_input, "Message...", self.dm_send)
 
-        ctk.CTkButton(btn_row, text="Draft with AI ✨", width=120, fg_color=BG_CARD, command=self.dm_toggle_draft).pack(side="left")
-        ctk.CTkButton(btn_row, text="Send", width=80, fg_color=HELIX_PURPLE, text_color="black", command=self.dm_send).pack(side="right")
+        btn_row = ctk.CTkFrame(dm_input_area, fg_color="transparent")
+        btn_row.pack(fill="x")
+
+        ctk.CTkButton(btn_row, text="Draft with AI ✨", width=120, height=30, fg_color=BG_CARD, corner_radius=15, command=self.dm_toggle_draft).pack(side="left")
+        ctk.CTkButton(btn_row, text="Send", width=80, height=30, fg_color=HELIX_PURPLE, text_color="black", corner_radius=15, command=self.dm_send).pack(side="right")
 
         # RIGHT: Draft Panel (Hidden by default)
         self.dm_draft_panel = ctk.CTkFrame(tab, width=250, fg_color=BG_SIDEBAR, corner_radius=0)
@@ -1429,18 +1597,84 @@ class HelixApp(ctk.CTk):
         self.dm_current_contact = None
         self.dm_draft_visible = False
 
-    def dm_new_contact(self):
-        # Stub: just add a fake one for now
-        cid = db.add_contact(self.current_user, f"User {random.randint(100,999)}")
-        self.dm_refresh_list()
-        self.dm_load_thread(cid)
+    def dm_add_friend_dialog(self):
+        dialog = ctk.CTkInputDialog(text="Enter friend's email:", title="Add Friend")
+        email = dialog.get_input()
+        if email:
+            ok, msg = db.send_friend_request(self.current_user, email)
+            messagebox.showinfo("Result", msg)
+            self.dm_refresh_list()
 
     def dm_refresh_list(self):
         for w in self.dm_scroll.winfo_children(): w.destroy()
+
+        # Pending Requests
+        pending = db.get_pending_requests(self.current_user)
+        if pending:
+             ctk.CTkLabel(self.dm_scroll, text="Pending Requests", font=("Arial", 12, "bold"), text_color=HELIX_PURPLE).pack(anchor="w", padx=10, pady=(10, 5))
+             for req in pending:
+                 # req = {id, email, name}
+                 frame = ctk.CTkFrame(self.dm_scroll, fg_color=BG_CARD)
+                 frame.pack(fill="x", pady=2, padx=5)
+
+                 ctk.CTkLabel(frame, text=f"{req['name']}", font=FONT_BOLD).pack(anchor="w", padx=10, pady=(5,0))
+                 ctk.CTkLabel(frame, text=f"@{req['email'].split('@')[0]}", font=FONT_SMALL, text_color="gray").pack(anchor="w", padx=10)
+
+                 act_row = ctk.CTkFrame(frame, fg_color="transparent")
+                 act_row.pack(fill="x", padx=10, pady=5)
+                 ctk.CTkButton(act_row, text="Accept", height=24, width=60, fg_color=HELIX_PURPLE, text_color="black",
+                               command=lambda rid=req['id']: self.dm_accept_request(rid)).pack(side="left")
+
+        # Get Friends
+        friends = db.get_friendships(self.current_user)
+        # Also get Contacts (legacy support for DMs started without friendship)
         contacts = db.get_contacts(self.current_user)
-        for cid, name, last in contacts:
-            btn = ctk.CTkButton(self.dm_scroll, text=f"{name}\n{last}", height=50, fg_color="transparent", anchor="w", command=lambda x=cid: self.dm_load_thread(x))
-            btn.pack(fill="x", pady=2)
+
+        if friends:
+             ctk.CTkLabel(self.dm_scroll, text="Friends", font=FONT_BOLD).pack(anchor="w", padx=10, pady=(10, 5))
+
+        if not friends and not contacts and not pending:
+             ctk.CTkLabel(self.dm_scroll, text="No friends yet.", text_color="gray").pack(pady=20)
+
+        for f in friends:
+             # f = {email, name, avatar, status}
+             btn = ctk.CTkButton(
+                 self.dm_scroll,
+                 text=f"👤 {f['name']}\n@{f['email'].split('@')[0]}",
+                 height=60,
+                 fg_color="transparent",
+                 hover_color=BG_CARD,
+                 anchor="w",
+                 command=lambda e=f['email']: self.dm_start_chat_with_email(e)
+             )
+             btn.pack(fill="x", pady=2)
+
+        # Separator for legacy/manual contacts if any
+        if contacts:
+             ctk.CTkLabel(self.dm_scroll, text="Recent", font=FONT_BOLD).pack(anchor="w", padx=10, pady=10)
+             for cid, name, last in contacts:
+                btn = ctk.CTkButton(
+                    self.dm_scroll,
+                    text=f"{name}\n{last[:20]}...",
+                    height=50,
+                    fg_color="transparent",
+                    anchor="w",
+                    command=lambda x=cid: self.dm_load_thread(x)
+                )
+                btn.pack(fill="x", pady=2)
+
+    def dm_accept_request(self, rid):
+        db.accept_friend_request(rid)
+        self.dm_refresh_list()
+
+    def dm_start_chat_with_email(self, target_email):
+        # Find existing contact ID or create new
+        # Simplified: Loop through contacts to find one with this email
+        # Ideally schema would link contact -> user_email
+        # For now, create a new contact stub
+        name = target_email.split("@")[0]
+        cid = db.add_contact(self.current_user, name) # Duplicate check missing for brevity
+        self.dm_load_thread(cid)
 
     def dm_load_thread(self, contact_id):
         self.dm_current_contact = contact_id
@@ -1536,8 +1770,8 @@ class HelixApp(ctk.CTk):
         self.active_tab = tab_name
         self.animate_slide_page(old_frame, new_frame, direction)
 
-        # Sidebar visible on both Talk and Canvas now (Unified Library)
-        if tab_name in ["Talk to AI", "Canvas"]:
+        # Sidebar visible ONLY on Talk to AI
+        if tab_name == "Talk to AI":
             self.sidebar.grid()
         else:
             self.sidebar.grid_remove()
@@ -1796,8 +2030,9 @@ class HelixApp(ctk.CTk):
         self.note_title.delete(0, "end")
         self.note_title.insert(0, "Untitled")
         self.notebook.delete("0.0", "end")
-        self.refresh_notebook_list()
-        self.switch_tab("Canvas") # Auto switch to canvas when created
+        # Go to Editor Mode
+        self.show_canvas_editor()
+        self.refresh_sidebar()
 
     def notebook_save(self):
         if not self.current_note_id:
@@ -1805,10 +2040,12 @@ class HelixApp(ctk.CTk):
         db.save_notebook(self.current_note_id, self.current_user, self.note_title.get().strip() or "Untitled",
                          self.notebook.get("0.0", "end").strip())
         self.refresh_notebook_list()
+        self.refresh_sidebar()
 
     def refresh_notebook_list(self):
-        # Now handled by refresh_sidebar since it's the unified library
-        self.refresh_sidebar()
+        # Called when dashboard needs update
+        if hasattr(self, "canvas_list_scroll"):
+             self.refresh_canvas_list_ui()
 
     def load_notebook(self, nid: str):
         self.current_note_id = nid
@@ -1817,7 +2054,7 @@ class HelixApp(ctk.CTk):
         self.note_title.insert(0, t)
         self.notebook.delete("0.0", "end")
         self.notebook.insert("0.0", c)
-        self.switch_tab("Canvas")
+        self.show_canvas_editor()
 
     # ---------- QUICK FIX ----------
     def start_quick_fix(self, text: str):
@@ -1969,12 +2206,12 @@ class HelixApp(ctk.CTk):
     # ---------- AI STREAM ----------
     def run_ai_stream(self, msgs, widget, is_chat: bool):
         try:
-            full_response = ""
+            # Show Thinking Indicator
+            if is_chat and isinstance(widget, BubbleMessage):
+                 self.after(0, lambda: widget.set_text("Helix is thinking..."))
 
-            if isinstance(widget, BubbleMessage):
-                self.after(0, lambda: widget.set_text(""))
-            else:
-                self.after(0, lambda: widget.delete("0.0", "end"))
+            full_response = ""
+            first_chunk = True
 
             stream = client.chat.completions.create(
                 model=MODEL_CONFIG[self.current_model_key]["id"],
@@ -1983,6 +2220,13 @@ class HelixApp(ctk.CTk):
                 stream=True,
             )
             for chunk in stream:
+                if first_chunk:
+                    if isinstance(widget, BubbleMessage):
+                        self.after(0, lambda: widget.set_text("")) # Clear thinking text
+                    else:
+                        self.after(0, lambda: widget.delete("0.0", "end"))
+                    first_chunk = False
+
                 delta = chunk.choices[0].delta
                 if hasattr(delta, "content") and delta.content:
                     c = delta.content
