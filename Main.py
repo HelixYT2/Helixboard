@@ -1626,6 +1626,9 @@ class HelixApp(ctk.CTk):
         # Initial empty state
         self.draw_fallback_avatar(self.dm_header)
 
+        # Init right side
+        self._init_dm_right_side(tab)
+
     def refresh_dm_header(self):
         # Clear old avatar widget content if any
         for w in self.dm_header.winfo_children():
@@ -1668,6 +1671,7 @@ class HelixApp(ctk.CTk):
         avatar_canvas.create_oval(2, 2, 38, 38, fill=HELIX_PURPLE, outline="")
         avatar_canvas.create_text(20, 20, text="ME", fill="black", font=("Arial", 10, "bold"))
 
+    def _init_dm_right_side(self, tab):
         ctk.CTkLabel(self.dm_list, text="Messages", font=FONT_BOLD, text_color=TEXT_GRAY).pack(anchor="w", padx=20, pady=(10, 5))
 
         self.dm_scroll = ctk.CTkScrollableFrame(self.dm_list, fg_color="transparent")
