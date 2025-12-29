@@ -931,19 +931,18 @@ class BubbleMessage:
                 border_width=1,
                 border_color=HELIX_PURPLE,
             )
-            # Use Textbox for copy/selectability
-            self.textbox = ctk.CTkTextbox(
+            # Use Label for auto-resizing
+            self.label = ctk.CTkLabel(
                 self.bubble,
+                text=text,
                 font=FONT_NORMAL,
                 text_color=TEXT_WHITE,
                 fg_color="transparent",
-                wrap="word",
-                height=0, # Auto-height hack requires manual calc, but CTkTextbox is better than Label for this
-                activate_scrollbars=False
+                wraplength=max_width_px - 40, # Roughly bubble width minus padding
+                justify="left",
+                anchor="w"
             )
-            self.textbox.insert("0.0", text)
-            self.textbox.configure(state="disabled")
-            self.textbox.pack(padx=12, pady=8, fill="both", expand=True)
+            self.label.pack(padx=15, pady=10)
 
             self.bubble.grid(row=0, column=0, sticky="e", padx=(80, 0), pady=10)
 
@@ -977,9 +976,11 @@ class BubbleMessage:
 
     def resize_textbox(self):
         # Rough calc: lines * line_height
+        if not hasattr(self, 'textbox'): return
+
         # This is a heuristic because CTkTextbox auto-sizing is tricky
         lines = self.text.count('\n') + (len(self.text) / 60) # approx chars per line
-        h = max(40, int(lines * 24) + 20)
+        h = max(40, int(lines * 24) + 30) # Increased padding
         self.textbox.configure(height=h)
 
     def grid(self, row: int):
@@ -988,22 +989,30 @@ class BubbleMessage:
 
     def set_text(self, txt: str):
         self.text = txt
-        self.textbox.configure(state="normal")
-        self.textbox.delete("0.0", "end")
-        self.textbox.insert("0.0", txt)
-        self.textbox.configure(state="disabled")
-        self.resize_textbox()
+        if self.role == "user":
+             self.label.configure(text=txt)
+        else:
+            self.textbox.configure(state="normal")
+            self.textbox.delete("0.0", "end")
+            self.textbox.insert("0.0", txt)
+            self.textbox.configure(state="disabled")
+            self.resize_textbox()
 
     def append_text(self, more: str):
         self.text += more
-        self.textbox.configure(state="normal")
-        self.textbox.insert("end", more)
-        self.textbox.configure(state="disabled")
-        self.resize_textbox()
+        if self.role == "user":
+             self.label.configure(text=self.text)
+        else:
+            self.textbox.configure(state="normal")
+            self.textbox.insert("end", more)
+            self.textbox.configure(state="disabled")
+            self.resize_textbox()
 
     def set_wraplength(self, px: int):
-        # CTkTextbox handles wrapping automatically via width
-        pass
+        if self.role == "user":
+             self.label.configure(wraplength=px - 40)
+        else:
+             pass
 
     def copy_text(self):
         pyperclip.copy(self.text)
@@ -1593,26 +1602,55 @@ class HelixApp(ctk.CTk):
         self.dm_list.grid_propagate(False)
 
         # Header: Avatar + Add Friend
-        dm_header = ctk.CTkFrame(self.dm_list, fg_color="transparent", height=60)
-        dm_header.pack(fill="x", padx=15, pady=20)
+        self.dm_header = ctk.CTkFrame(self.dm_list, fg_color="transparent", height=60)
+        self.dm_header.pack(fill="x", padx=15, pady=20)
 
-        # Current User Avatar
-        # Check DB for avatar path
-        _, _, _, my_av_path = db.get_profile(self.current_user)
-
-        if my_av_path and os.path.exists(my_av_path):
-             try:
-                 pil_img = Image.open(my_av_path)
-                 av_img = ctk.CTkImage(light_image=make_circle(pil_img), size=(40, 40))
-                 ctk.CTkLabel(dm_header, text="", image=av_img).pack(side="left")
-             except:
-                 self.draw_fallback_avatar(dm_header)
-        else:
-             self.draw_fallback_avatar(dm_header)
+        # Avatar (Loaded later in show_app)
+        self.dm_avatar_lbl = ctk.CTkLabel(self.dm_header, text="")
+        self.dm_avatar_lbl.pack(side="left")
 
         # Add Friend Button
         ctk.CTkButton(
-            dm_header,
+            self.dm_header,
+            text="+",
+            width=35,
+            height=35,
+            corner_radius=17,
+            fg_color=BG_CARD,
+            hover_color=BG_INPUT,
+            text_color="white",
+            font=("Arial", 20),
+            command=self.dm_add_friend_dialog
+        ).pack(side="right")
+
+        # Initial empty state
+        self.draw_fallback_avatar(self.dm_header)
+
+    def refresh_dm_header(self):
+        # Clear old avatar widget content if any
+        for w in self.dm_header.winfo_children():
+            if isinstance(w, ctk.CTkLabel) or isinstance(w, ctk.CTkCanvas):
+                w.destroy()
+
+        # Re-add Avatar
+        if self.current_user:
+            _, _, _, my_av_path = db.get_profile(self.current_user)
+            if my_av_path and os.path.exists(my_av_path):
+                 try:
+                     pil_img = Image.open(my_av_path)
+                     av_img = ctk.CTkImage(light_image=make_circle(pil_img), size=(40, 40))
+                     lbl = ctk.CTkLabel(self.dm_header, text="", image=av_img)
+                     lbl.pack(side="left")
+                 except:
+                     self.draw_fallback_avatar(self.dm_header)
+            else:
+                 self.draw_fallback_avatar(self.dm_header)
+        else:
+            self.draw_fallback_avatar(self.dm_header)
+
+        # Re-add Button (since we cleared children)
+        ctk.CTkButton(
+            self.dm_header,
             text="+",
             width=35,
             height=35,
@@ -1891,6 +1929,8 @@ class HelixApp(ctk.CTk):
         self.saved_chats = cleaned
 
         self.refresh_sidebar()
+        if hasattr(self, "refresh_dm_header"):
+             self.refresh_dm_header()
         self.create_new_chat()
 
         # Reset pages
